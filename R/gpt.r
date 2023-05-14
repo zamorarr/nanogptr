@@ -86,11 +86,11 @@ layer_pos_embedding <- new_layer_class(
 
     positions <- tf$range(input_dim)
     embeddings <- self$embedding(positions)
+
     # trim to match the length of input, which
     # might be less than length of input_dim of layer
-    #embeddings <- tf$slice(
-    #  self$w, c(0L, 0L), c(input_dim, output_dim)
-    #)
+    embeddings <- tf$slice(embeddings, c(0L, 0L), c(input_dim, self$output_dim))
+    #embeddings <- embeddings[1:input_dim,]
 
     # broadcast to add missing batch dimensions
     new_shp <- tf$concat(list(shp, list(self$output_dim)), axis = -1L)
@@ -108,6 +108,7 @@ layer_self_attention <- new_layer_class(
     self$query <- keras$layers$Dense(output_size, use_bias = FALSE)
     self$value <- keras$layers$Dense(output_size, use_bias = FALSE)
     self$tril <- self$create_tril(c(block_size, block_size))
+    self$w_norm <- tf$sqrt(tf$cast(output_size, tf$dtypes$float32))
 
     self$output_size <- as.integer(output_size)
   },
@@ -127,36 +128,45 @@ layer_self_attention <- new_layer_class(
   },
 
   call = function(inputs) {
+    # inputs {B, L, V}
+    shp <- tf$shape(inputs)
+    context_size <- shp[2]
+
     # project inputs
-    k <- self$key(inputs) # {B, L, S} S=output_size
-    q <- self$query(inputs) # {B, L, S}
-    v <- self$value(inputs) # {B, L, S}
+    k <- self$key(inputs) # {B, L, A} A = attention output_size
+    q <- self$query(inputs) # {B, L, A}
+    v <- self$value(inputs) # {B, L, A}
 
     # calculate affinities
-    kt <- k_permute_dimensions(k, c(1, 3, 2)) # {B, S, L}
-    w <- tf$matmul(q, kt)/tf$sqrt(tf$cast(self$output_size, tf$dtypes$float32)) # {B, L, L}
+    kt <- k_permute_dimensions(k, c(1, 3, 2)) # {B, A, L}
+    w <- tf$matmul(q, kt)/self$w_norm # {B,L,A} x {B,A,L} = {B, L, L}
 
     # mask for casual self-attention (cannot see tokens in front of it)
-    w <- tf$where(!self$tril, tf$fill(tf$shape(w), -Inf), w)
+    # trim tril to {context_size,context_size}. Can be up to {block_size, block_size}
+    tril <- tf$slice(self$tril, c(0L, 0L), c(context_size, context_size))
+    w <- tf$where(!tril, tf$fill(tf$shape(w), -Inf), w)
     w <- k_softmax(w)
 
     # calculate weighted values
-    tf$matmul(w, v) # {B,L,L} x {B,L,S} = {B,L,S}
+    tf$matmul(w, v) # {B,L,L} x {B,L,A} = {B,L,A}
   }
 )
 
 # model
 #inputs <- layer_input(shape = c(block_size), name = "input")
+attention_size <- embed_size
+
 inputs <- layer_input(shape = list(NULL), name = "input")
 token_embeds <- inputs |> layer_embedding(vocab_size, embed_size, name = "token_embeddings")
 pos_embeds <- inputs |> layer_pos_embedding(block_size, embed_size, name = "position_embeddings")
 token_pos_embeds <- layer_add(list(token_embeds, pos_embeds))
-lm_head <- token_pos_embeds |> layer_self_attention(block_size, attention_size, name = "self_attention")
-#lm_head <- token_pos_embeds |> layer_dense(units = vocab_size)
+sa_head <- token_pos_embeds |> layer_self_attention(block_size, attention_size, name = "self_attention")
+lm_head <- sa_head |> layer_dense(units = vocab_size)
 model <- keras_model(inputs, lm_head, name = "gpt_model")
 
 
-model((dataset |> dataset_take(1) |> dataset_collect())[[1]][[1]]) |> dim()
+#model((dataset |> dataset_take(1) |> dataset_collect())[[1]][[1]]) |> dim()
+#model((dataset |> dataset_take(1) |> dataset_collect())[[1]][[1]][,1:3]) |> dim()
 plot(model)
 
 compile(
@@ -169,8 +179,13 @@ history <- fit(model, dataset, epochs = max_epochs)
 generate <- function(model, inputs, max_new_tokens = 100) {
   # inputs is (B,T) array of indices in current context
   for (i in seq_len(max_new_tokens)) {
+    # crop inputs to last block_size tokens
+    context_size <- ncol(inputs)
+    start <- max(context_size - block_size + 1,1)
+    inputs_cropped <- inputs[,start:context_size]
+
     # get the predictions
-    logits <- model(inputs) # {B, T, C}
+    logits <- model(inputs_cropped) # {B, T, C}
 
     # focus on last context token (bigram model)
     logits <- logits[,dim(logits)[2],] # {B, C}
