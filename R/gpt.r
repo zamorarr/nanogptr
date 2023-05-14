@@ -9,6 +9,7 @@ tf$test$is_gpu_available()
 # hyper params
 batch_size <- 128L # number of sequences to process
 block_size <- 8L # max context length for predictions
+attention_size <- 6L # size of attention output features
 learning_rate <- 1E-3
 embed_size <- 32L
 max_epochs <- 10L
@@ -99,15 +100,63 @@ layer_pos_embedding <- new_layer_class(
   get_config = NULL
 )
 
+layer_self_attention <- new_layer_class(
+  "SelfAttention",
+  initialize = function(block_size, output_size, ...) {
+    super$initialize(...)
+    self$key <- keras$layers$Dense(output_size, use_bias = FALSE)
+    self$query <- keras$layers$Dense(output_size, use_bias = FALSE)
+    self$value <- keras$layers$Dense(output_size, use_bias = FALSE)
+    self$tril <- self$create_tril(c(block_size, block_size))
+
+    self$output_size <- as.integer(output_size)
+  },
+
+  create_tril = function(shape) {
+    # creates lower triangular boolean mask over last 2 dimensions
+    row_index <- tf$cumsum(tf$ones(shape = shape, dtype = tf$int32), axis = -2L)
+    col_index <- tf$cumsum(tf$ones(shape = shape, dtype = tf$int32), axis = -1L)
+    tf$greater_equal(row_index, col_index)
+    #row_index <- k_cumsum(k_ones(shape, dtype = tf$dtypes$int32), axis = -2)
+    #col_index <- k_cumsum(k_ones(shape, dtype = tf$dtypes$int32), axis = -1)
+    #k_greater_equal(row_index, col_index)
+  },
+
+  build = function(input_shape) {
+    super()$build(input_shape)
+  },
+
+  call = function(inputs) {
+    # project inputs
+    k <- self$key(inputs) # {B, L, S} S=output_size
+    q <- self$query(inputs) # {B, L, S}
+    v <- self$value(inputs) # {B, L, S}
+
+    # calculate affinities
+    kt <- k_permute_dimensions(k, c(1, 3, 2)) # {B, S, L}
+    w <- tf$matmul(q, kt)/tf$sqrt(tf$cast(self$output_size, tf$dtypes$float32)) # {B, L, L}
+
+    # mask for casual self-attention (cannot see tokens in front of it)
+    w <- tf$where(!self$tril, tf$fill(tf$shape(w), -Inf), w)
+    w <- k_softmax(w)
+
+    # calculate weighted values
+    tf$matmul(w, v) # {B,L,L} x {B,L,S} = {B,L,S}
+  }
+)
+
 # model
 #inputs <- layer_input(shape = c(block_size), name = "input")
 inputs <- layer_input(shape = list(NULL), name = "input")
 token_embeds <- inputs |> layer_embedding(vocab_size, embed_size, name = "token_embeddings")
 pos_embeds <- inputs |> layer_pos_embedding(block_size, embed_size, name = "position_embeddings")
-lm_head <- layer_add(list(token_embeds, pos_embeds)) |>
-  layer_dense(units = vocab_size)
+token_pos_embeds <- layer_add(list(token_embeds, pos_embeds))
+lm_head <- token_pos_embeds |> layer_self_attention(block_size, attention_size, name = "self_attention")
+#lm_head <- token_pos_embeds |> layer_dense(units = vocab_size)
 model <- keras_model(inputs, lm_head, name = "gpt_model")
 
+
+model((dataset |> dataset_take(1) |> dataset_collect())[[1]][[1]]) |> dim()
 plot(model)
 
 compile(
