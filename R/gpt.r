@@ -9,6 +9,7 @@ tf$test$is_gpu_available()
 # hyper params
 batch_size <- 128L # number of sequences to process
 block_size <- 8L # max context length for predictions
+attention_heads <- 4L
 attention_size <- 6L # size of attention output features
 learning_rate <- 1E-3
 embed_size <- 32L
@@ -46,16 +47,21 @@ val_data <- data[(n+1):length(data)]
 stopifnot(length(train_data) + length(val_data) == length(data))
 
 # build data pipeline
-dataset <- tensor_slices_dataset(train_data) |>
-  dataset_batch(block_size + 1, drop_remainder = TRUE) |>
-  dataset_map(function(x) {
-    input_text <- x[1:block_size]
-    target_text <- x[2:(block_size + 1)]
-    list(input_text, target_text)
-  }) |>
-  dataset_shuffle(1000) |>
-  dataset_batch(batch_size, drop_remainder = TRUE) |>
-  dataset_prefetch()
+build_pipeline <- function(x) {
+  tensor_slices_dataset(x) |>
+    dataset_batch(block_size + 1, drop_remainder = TRUE) |>
+    dataset_map(function(x) {
+      input_text <- x[1:block_size]
+      target_text <- x[2:(block_size + 1)]
+      list(input_text, target_text)
+    }) |>
+    dataset_shuffle(1000) |>
+    dataset_batch(batch_size, drop_remainder = TRUE) |>
+    dataset_prefetch()
+}
+
+dataset <- build_pipeline(train_data)
+dataset_val <- build_pipeline(val_data)
 
 # custom layers
 layer_pos_embedding <- new_layer_class(
@@ -66,19 +72,9 @@ layer_pos_embedding <- new_layer_class(
     #self$output_dim <- as.integer(output_dim)
     self$input_dim <- input_dim
     self$output_dim <- output_dim
-    self$embedding <- keras$layers$Embedding(input_dim, output_dim)
+    #self$embedding <- keras$layers$Embedding(input_dim, output_dim)
+    self$embedding <- layer_embedding(input_dim = input_dim, output_dim = output_dim)
   },
-
-  # build = function(input_shape) {
-  #   self$w <- self$add_weight(
-  #     "embeddings",
-  #     shape = shape(self$input_dim, self$output_dim),
-  #     initializer = self$initializer,
-  #     trainable = TRUE
-  #   )
-  #
-  #   super()$build(input_shape)
-  # },
 
   call = function(inputs) {
     shp <- tf$shape(inputs)
@@ -104,10 +100,11 @@ layer_self_attention <- new_layer_class(
   "SelfAttention",
   initialize = function(block_size, output_size, ...) {
     super$initialize(...)
-    self$key <- keras$layers$Dense(output_size, use_bias = FALSE)
-    self$query <- keras$layers$Dense(output_size, use_bias = FALSE)
-    self$value <- keras$layers$Dense(output_size, use_bias = FALSE)
-    self$tril <- self$create_tril(c(block_size, block_size))
+    self$key <- layer_dense(units = output_size, use_bias = FALSE)
+    self$query <- layer_dense(units = output_size, use_bias = FALSE)
+    self$value <- layer_dense(units = output_size, use_bias = FALSE)
+
+    self$tril_mask <- self$create_tril(c(block_size, block_size))
     self$w_norm <- tf$sqrt(tf$cast(output_size, tf$dtypes$float32))
 
     self$output_size <- as.integer(output_size)
@@ -121,10 +118,6 @@ layer_self_attention <- new_layer_class(
     #row_index <- k_cumsum(k_ones(shape, dtype = tf$dtypes$int32), axis = -2)
     #col_index <- k_cumsum(k_ones(shape, dtype = tf$dtypes$int32), axis = -1)
     #k_greater_equal(row_index, col_index)
-  },
-
-  build = function(input_shape) {
-    super()$build(input_shape)
   },
 
   call = function(inputs) {
@@ -143,12 +136,64 @@ layer_self_attention <- new_layer_class(
 
     # mask for casual self-attention (cannot see tokens in front of it)
     # trim tril to {context_size,context_size}. Can be up to {block_size, block_size}
-    tril <- tf$slice(self$tril, c(0L, 0L), c(context_size, context_size))
-    w <- tf$where(!tril, tf$fill(tf$shape(w), -Inf), w)
+    tril_mask <- tf$slice(self$tril_mask, c(0L, 0L), c(context_size, context_size))
+    w <- tf$where(!tril_mask, tf$fill(tf$shape(w), -Inf), w)
     w <- k_softmax(w)
 
     # calculate weighted values
     tf$matmul(w, v) # {B,L,L} x {B,L,A} = {B,L,A}
+  }
+)
+
+layer_multi_self_attention <- new_layer_class(
+  "MultiSelfAttention",
+  initialize = function(num_heads, block_size, attention_size, units, ...) {
+    super$initialize(...)
+    self$heads <- lapply(seq_len(num_heads), function(i) {
+      layer_self_attention(block_size = block_size, output_size = attention_size)
+    })
+    self$proj <- layer_dense(units = units)
+  },
+
+
+  call = function(input) {
+    out <- lapply(self$heads, function(h) h(input))
+    out <- tf$concat(out, axis = -1L)
+    self$proj(out)
+  }
+)
+
+layer_feedforward <- new_layer_class(
+  "FeedForward",
+  initialize = function(units, ...) {
+    super$initialize(...)
+    self$dense <- layer_dense(units = 4*units, activation = "relu")
+    self$proj <- layer_dense(units = units)
+  },
+  call = function(input) {
+    input |>
+      self$dense() |>
+      self$proj()
+  }
+)
+
+layer_transformer_block <- new_layer_class(
+  "TransformerBlock",
+  initialize = function(num_heads, embed_size, context_size, attention_size, ...) {
+    super$initialize(...)
+    attention_size <- embed_size %/% num_heads
+    self$sa <- layer_multi_self_attention(
+      num_heads = num_heads,
+      block_size = context_size,
+      attention_size = attention_size,
+      units = embed_size)
+    self$ffwd <- layer_feedforward(units = embed_size)
+  },
+  call = function(input) {
+    # residual connection
+    x <- input + self$sa(input)
+    x <- x + self$ffwd(x)
+    x
   }
 )
 
@@ -160,21 +205,33 @@ inputs <- layer_input(shape = list(NULL), name = "input")
 token_embeds <- inputs |> layer_embedding(vocab_size, embed_size, name = "token_embeddings")
 pos_embeds <- inputs |> layer_pos_embedding(block_size, embed_size, name = "position_embeddings")
 token_pos_embeds <- layer_add(list(token_embeds, pos_embeds))
-sa_head <- token_pos_embeds |> layer_self_attention(block_size, attention_size, name = "self_attention")
-lm_head <- sa_head |> layer_dense(units = vocab_size)
+#sa_head <- token_pos_embeds |> layer_self_attention(block_size, attention_size, name = "self_attention")
+#sa_heads <- token_pos_embeds |> layer_multi_self_attention(
+#  num_heads = attention_heads,
+#  block_size = block_size,
+#  attention_size = attention_size %/% attention_heads,
+#  units = embed_size,
+#  name = "self_attention")
+
+sa_blocks <- token_pos_embeds |>
+  layer_transformer_block(4, embed_size, block_size) |>
+  layer_transformer_block(4, embed_size, block_size) |>
+  layer_transformer_block(4, embed_size, block_size)
+
+lm_head <- sa_blocks |> layer_dense(units = vocab_size, name = "linear_head")
 model <- keras_model(inputs, lm_head, name = "gpt_model")
 
 
 #model((dataset |> dataset_take(1) |> dataset_collect())[[1]][[1]]) |> dim()
 #model((dataset |> dataset_take(1) |> dataset_collect())[[1]][[1]][,1:3]) |> dim()
-plot(model)
+plot(model, show_shapes = TRUE)
 
 compile(
   model,
   loss = loss_sparse_categorical_crossentropy(from_logits = TRUE),
   optimizer = optimizer_adam(learning_rate))
 
-history <- fit(model, dataset, epochs = max_epochs)
+history <- fit(model, dataset, epochs = max_epochs, validation_data = dataset_val)
 
 generate <- function(model, inputs, max_new_tokens = 100) {
   # inputs is (B,T) array of indices in current context
