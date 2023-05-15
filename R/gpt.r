@@ -7,12 +7,14 @@ reticulate::use_condaenv("r-reticulate")
 tf$test$is_gpu_available()
 
 # hyper params
-batch_size <- 128L # number of sequences to process
-block_size <- 8L # max context length for predictions
-attention_heads <- 4L
-attention_size <- 6L # size of attention output features
-learning_rate <- 1E-3
-embed_size <- 32L
+batch_size <- 64 # number of sequences to process
+block_size <- 128L # max context length for predictions
+embed_size <- 96L
+attention_heads <- 6L
+#attention_size <- 6L # size of attention output features = embed_size %/% attention_heads
+num_transformers <- 6L
+dropout_rate = 0.2
+learning_rate <- 3E-4
 max_epochs <- 10L
 
 # get tiny shakespeare dataset
@@ -60,7 +62,7 @@ build_pipeline <- function(x) {
     dataset_prefetch()
 }
 
-dataset <- build_pipeline(train_data)
+dataset_train <- build_pipeline(train_data)
 dataset_val <- build_pipeline(val_data)
 
 # custom layers
@@ -68,18 +70,17 @@ layer_pos_embedding <- new_layer_class(
   "PosEmbedding",
   initialize = function(input_dim, output_dim, ...) {
     super$initialize(...)
-    #self$input_dim <- as.integer(input_dim)
-    #self$output_dim <- as.integer(output_dim)
     self$input_dim <- input_dim
     self$output_dim <- output_dim
-    #self$embedding <- keras$layers$Embedding(input_dim, output_dim)
     self$embedding <- layer_embedding(input_dim = input_dim, output_dim = output_dim)
   },
 
   call = function(inputs) {
+    # get context size of inputs (can be less than layer context size)
     shp <- tf$shape(inputs)
     input_dim <- shp[2]
 
+    # create positions input
     positions <- tf$range(input_dim)
     embeddings <- self$embedding(positions)
 
@@ -91,21 +92,21 @@ layer_pos_embedding <- new_layer_class(
     # broadcast to add missing batch dimensions
     new_shp <- tf$concat(list(shp, list(self$output_dim)), axis = -1L)
     tf$broadcast_to(embeddings, new_shp)
-  },
-
-  get_config = NULL
+  }
 )
 
 layer_self_attention <- new_layer_class(
   "SelfAttention",
-  initialize = function(block_size, output_size, ...) {
+  initialize = function(max_context_size, output_size, dropout_rate = 0, ...) {
     super$initialize(...)
     self$key <- layer_dense(units = output_size, use_bias = FALSE)
     self$query <- layer_dense(units = output_size, use_bias = FALSE)
     self$value <- layer_dense(units = output_size, use_bias = FALSE)
 
-    self$tril_mask <- self$create_tril(c(block_size, block_size))
+    self$tril_mask <- self$create_tril(c(max_context_size, max_context_size))
     self$w_norm <- tf$sqrt(tf$cast(output_size, tf$dtypes$float32))
+
+    self$dropout <- layer_dropout(rate = dropout_rate)
 
     self$output_size <- as.integer(output_size)
   },
@@ -140,6 +141,9 @@ layer_self_attention <- new_layer_class(
     w <- tf$where(!tril_mask, tf$fill(tf$shape(w), -Inf), w)
     w <- k_softmax(w)
 
+    # dropout
+    w <- self$dropout(w)
+
     # calculate weighted values
     tf$matmul(w, v) # {B,L,L} x {B,L,A} = {B,L,A}
   }
@@ -147,79 +151,100 @@ layer_self_attention <- new_layer_class(
 
 layer_multi_self_attention <- new_layer_class(
   "MultiSelfAttention",
-  initialize = function(num_heads, block_size, attention_size, units, ...) {
+  initialize = function(num_heads, max_context_size, attention_size, dense_units,
+                        dropout_rate = 0, ...) {
     super$initialize(...)
     self$heads <- lapply(seq_len(num_heads), function(i) {
-      layer_self_attention(block_size = block_size, output_size = attention_size)
+      layer_self_attention(max_context_size = max_context_size, output_size = attention_size, dropout_rate = dropout_rate)
     })
-    self$proj <- layer_dense(units = units)
+
+    self$proj <- layer_dense(units = dense_units)
+    self$dropout <- layer_dropout(rate = dropout_rate)
   },
 
 
   call = function(input) {
     out <- lapply(self$heads, function(h) h(input))
     out <- tf$concat(out, axis = -1L)
-    self$proj(out)
+    out |> self$proj() |> self$dropout()
   }
 )
 
 layer_feedforward <- new_layer_class(
   "FeedForward",
-  initialize = function(units, ...) {
+  initialize = function(units, dropout_rate = 0, ...) {
     super$initialize(...)
+
+    # factor of 4 from Attention is All you Need paper
     self$dense <- layer_dense(units = 4*units, activation = "relu")
     self$proj <- layer_dense(units = units)
+    self$dropout <- layer_dropout(rate = dropout_rate)
   },
   call = function(input) {
     input |>
       self$dense() |>
-      self$proj()
+      self$proj() |>
+      self$dropout()
   }
 )
 
 layer_transformer_block <- new_layer_class(
   "TransformerBlock",
-  initialize = function(num_heads, embed_size, context_size, attention_size, ...) {
+  initialize = function(num_heads, max_context_size, embed_size, dropout_rate = 0, ...) {
     super$initialize(...)
+
+    # self attention
     attention_size <- embed_size %/% num_heads
     self$sa <- layer_multi_self_attention(
       num_heads = num_heads,
-      block_size = context_size,
+      max_context_size = max_context_size,
       attention_size = attention_size,
-      units = embed_size)
-    self$ffwd <- layer_feedforward(units = embed_size)
+      dense_units = embed_size,
+      dropout_rate = dropout_rate)
+
+    # feed forward
+    self$ffwd <- layer_feedforward(units = embed_size, dropout_rate = dropout_rate)
+
+    # layer norms
+    self$ln1 <- layer_layer_normalization(axis = -1L)
+    self$ln2 <- layer_layer_normalization(axis = -1L)
   },
+
   call = function(input) {
     # residual connection
-    x <- input + self$sa(input)
-    x <- x + self$ffwd(x)
+    x <- input + self$sa(self$ln1(input))
+    x <- x + self$ffwd(self$ln2(x))
     x
   }
 )
 
 # model
-#inputs <- layer_input(shape = c(block_size), name = "input")
-attention_size <- embed_size
-
 inputs <- layer_input(shape = list(NULL), name = "input")
 token_embeds <- inputs |> layer_embedding(vocab_size, embed_size, name = "token_embeddings")
 pos_embeds <- inputs |> layer_pos_embedding(block_size, embed_size, name = "position_embeddings")
-token_pos_embeds <- layer_add(list(token_embeds, pos_embeds))
-#sa_head <- token_pos_embeds |> layer_self_attention(block_size, attention_size, name = "self_attention")
-#sa_heads <- token_pos_embeds |> layer_multi_self_attention(
+input_embeds <- layer_add(list(token_embeds, pos_embeds))
+
+#sa_head <- input_embeds |> layer_self_attention(block_size, attention_size, name = "self_attention")
+#sa_heads <- input_embeds |> layer_multi_self_attention(
 #  num_heads = attention_heads,
 #  block_size = block_size,
 #  attention_size = attention_size %/% attention_heads,
 #  units = embed_size,
 #  name = "self_attention")
 
-sa_blocks <- token_pos_embeds |>
-  layer_transformer_block(4, embed_size, block_size) |>
-  layer_transformer_block(4, embed_size, block_size) |>
-  layer_transformer_block(4, embed_size, block_size)
+transformer_blocks <- input_embeds
+for (i in seq_len(num_transformers)) {
+  transformer_blocks <- transformer_blocks |>
+    layer_transformer_block(
+      attention_heads, block_size, embed_size, dropout_rate = dropout_rate,
+      name = paste0("transformer_", i))
+}
 
-lm_head <- sa_blocks |> layer_dense(units = vocab_size, name = "linear_head")
-model <- keras_model(inputs, lm_head, name = "gpt_model")
+output <- transformer_blocks |>
+  layer_layer_normalization(axis = -1L) |>
+  layer_dense(units = vocab_size, name = "linear_head")
+
+model <- keras_model(inputs, output, name = "gpt_model")
 
 
 #model((dataset |> dataset_take(1) |> dataset_collect())[[1]][[1]]) |> dim()
@@ -231,14 +256,17 @@ compile(
   loss = loss_sparse_categorical_crossentropy(from_logits = TRUE),
   optimizer = optimizer_adam(learning_rate))
 
-history <- fit(model, dataset, epochs = max_epochs, validation_data = dataset_val)
+history <- fit(model, dataset_train, epochs = max_epochs, validation_data = dataset_val)
 
 generate <- function(model, inputs, max_new_tokens = 100) {
   # inputs is (B,T) array of indices in current context
+  pb <- progress::progress_bar$new(total = max_new_tokens, format = "[:bar] :current/:total (:percent)")
   for (i in seq_len(max_new_tokens)) {
+    pb$tick()
     # crop inputs to last block_size tokens
     context_size <- ncol(inputs)
     start <- max(context_size - block_size + 1,1)
+    #cat(sprintf("[%i] %i to %i\n", i, start, context_size))
     inputs_cropped <- inputs[,start:context_size]
 
     # get the predictions
@@ -260,4 +288,8 @@ generate <- function(model, inputs, max_new_tokens = 100) {
 
 # dummy input
 dummy_input <- tf$constant(encode("A"), shape = shape(1, 1), dtype = tf$dtypes$int64)
-cat(decode(generate(model, dummy_input, 100)$numpy()[1,]))
+dummy_output <- generate(model, dummy_input, 100)
+cat(decode(dummy_output$numpy()[1,]))
+
+# save model
+save_model_weights_tf(model, "checkpoints/gpt.ckpt")
