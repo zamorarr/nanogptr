@@ -7,13 +7,13 @@ reticulate::use_condaenv("r-reticulate")
 tf$test$is_gpu_available()
 
 # hyper params
-batch_size <- 64 # number of sequences to process
-block_size <- 128L # max context length for predictions
-embed_size <- 96L
-attention_heads <- 6L
+batch_size <- 12 # number of sequences to process
+block_size <- 64L # max context length for predictions
+embed_size <- 128L
+attention_heads <- 4L
 #attention_size <- 6L # size of attention output features = embed_size %/% attention_heads
-num_transformers <- 6L
-dropout_rate = 0.2
+num_transformers <- 4L
+dropout_rate = 0.0
 learning_rate <- 3E-4
 max_epochs <- 10L
 
@@ -266,7 +266,6 @@ generate <- function(model, inputs, max_new_tokens = 100) {
     # crop inputs to last block_size tokens
     context_size <- ncol(inputs)
     start <- max(context_size - block_size + 1,1)
-    #cat(sprintf("[%i] %i to %i\n", i, start, context_size))
     inputs_cropped <- inputs[,start:context_size]
 
     # get the predictions
