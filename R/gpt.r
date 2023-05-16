@@ -260,7 +260,10 @@ history <- fit(model, dataset_train, epochs = max_epochs, validation_data = data
 
 generate <- function(model, inputs, max_new_tokens = 100) {
   # inputs is (B,T) array of indices in current context
-  pb <- progress::progress_bar$new(total = max_new_tokens, format = "[:bar] :current/:total (:percent)")
+  pb <- progress::progress_bar$new(
+    total = max_new_tokens,
+    format = "[:bar] :current/:total (:percent) eta: :eta")
+
   for (i in seq_len(max_new_tokens)) {
     pb$tick()
     # crop inputs to last block_size tokens
@@ -287,8 +290,13 @@ generate <- function(model, inputs, max_new_tokens = 100) {
 
 # dummy input
 dummy_input <- tf$constant(encode("A"), shape = shape(1, 1), dtype = tf$dtypes$int64)
-dummy_output <- generate(model, dummy_input, 100)
+dummy_output <- generate(model, dummy_input, 1000)
 cat(decode(dummy_output$numpy()[1,]))
+writeLines(decode(dummy_output$numpy()[1,]), "data/more.txt")
+
+# write larger output
+#large_output <- generate(model, dummy_input, 10000)
+#writeLines(decode(large_output$numpy()[1,]), "data/more.txt")
 
 # save model
 save_model_weights_tf(model, "checkpoints/gpt.ckpt")
