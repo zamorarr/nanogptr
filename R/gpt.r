@@ -92,6 +92,13 @@ layer_pos_embedding <- new_layer_class(
     # broadcast to add missing batch dimensions
     new_shp <- tf$concat(list(shp, list(self$output_dim)), axis = -1L)
     tf$broadcast_to(embeddings, new_shp)
+  },
+
+  get_config = function() {
+    config <- super$get_config()
+    config$input_dim <- self$input_dim
+    config$output_dim <- self$output_dim
+    config
   }
 )
 
@@ -108,7 +115,9 @@ layer_self_attention <- new_layer_class(
 
     self$dropout <- layer_dropout(rate = dropout_rate)
 
+    self$max_context_size <- max_context_size
     self$output_size <- as.integer(output_size)
+    self$dropout_rate <- dropout_rate
   },
 
   create_tril = function(shape) {
@@ -146,6 +155,14 @@ layer_self_attention <- new_layer_class(
 
     # calculate weighted values
     tf$matmul(w, v) # {B,L,L} x {B,L,A} = {B,L,A}
+  },
+
+  get_config = function() {
+    config <- super$get_config()
+    config$max_context_size <- self$max_context_size
+    config$output_size <- self$output_size
+    config$dropout_rate <- self$dropout_rate
+    config
   }
 )
 
@@ -154,12 +171,20 @@ layer_multi_self_attention <- new_layer_class(
   initialize = function(num_heads, max_context_size, attention_size, dense_units,
                         dropout_rate = 0, ...) {
     super$initialize(...)
+
+    # layers
     self$heads <- lapply(seq_len(num_heads), function(i) {
       layer_self_attention(max_context_size = max_context_size, output_size = attention_size, dropout_rate = dropout_rate)
     })
-
     self$proj <- layer_dense(units = dense_units)
     self$dropout <- layer_dropout(rate = dropout_rate)
+
+    # config
+    self$num_heads <- num_heads
+    self$max_context_size <- max_context_size
+    self$attention_size <- attention_size
+    self$dense_units <- dense_units
+    self$dropout_rate <- dropout_rate
   },
 
 
@@ -167,6 +192,16 @@ layer_multi_self_attention <- new_layer_class(
     out <- lapply(self$heads, function(h) h(input))
     out <- tf$concat(out, axis = -1L)
     out |> self$proj() |> self$dropout()
+  },
+
+  get_config = function() {
+    config <- super$get_config()
+    config$num_heads <- self$num_heads
+    config$max_context_size <- self$max_context_size
+    config$attention_size <- self$attention_size
+    config$dense_units <- self$dense_units
+    config$dropout_rate <- self$dropout_rate
+    config
   }
 )
 
@@ -175,16 +210,29 @@ layer_feedforward <- new_layer_class(
   initialize = function(units, dropout_rate = 0, ...) {
     super$initialize(...)
 
+    # layers
     # factor of 4 from Attention is All you Need paper
     self$dense <- layer_dense(units = 4*units, activation = "relu")
     self$proj <- layer_dense(units = units)
     self$dropout <- layer_dropout(rate = dropout_rate)
+
+    # config
+    self$units <- units
+    self$dropout_rate <- dropout_rate
   },
+
   call = function(input) {
     input |>
       self$dense() |>
       self$proj() |>
       self$dropout()
+  },
+
+  get_config = function() {
+    config <- super$get_config()
+    config$units <- self$units
+    config$dropout_rate <- self$dropout_rate
+    config
   }
 )
 
@@ -208,6 +256,12 @@ layer_transformer_block <- new_layer_class(
     # layer norms
     self$ln1 <- layer_layer_normalization(axis = -1L)
     self$ln2 <- layer_layer_normalization(axis = -1L)
+
+    # config
+    self$num_heads <- num_heads
+    self$max_context_size <- max_context_size
+    self$embed_size <- embed_size
+    self$dropout_rate <- dropout_rate
   },
 
   call = function(input) {
@@ -215,6 +269,15 @@ layer_transformer_block <- new_layer_class(
     x <- input + self$sa(self$ln1(input))
     x <- x + self$ffwd(self$ln2(x))
     x
+  },
+
+  get_config = function() {
+    config <- super$get_config()
+    config$num_heads <- self$num_heads
+    config$max_context_size <- self$max_context_size
+    config$embed_size <- self$embed_size
+    config$dropout_rate <- self$dropout_rate
+    config
   }
 )
 
@@ -289,14 +352,19 @@ generate <- function(model, inputs, max_new_tokens = 100) {
 }
 
 # dummy input
-dummy_input <- tf$constant(encode("A"), shape = shape(1, 1), dtype = tf$dtypes$int64)
-dummy_output <- generate(model, dummy_input, 1000)
+dummy_prompt <- encode("BOBBY:\n")
+dummy_input <- tf$constant(dummy_prompt, shape = shape(1, length(dummy_prompt)), dtype = tf$dtypes$int64)
+dummy_output <- generate(model, dummy_input, 100)
 cat(decode(dummy_output$numpy()[1,]))
-writeLines(decode(dummy_output$numpy()[1,]), "data/more.txt")
 
 # write larger output
-#large_output <- generate(model, dummy_input, 10000)
-#writeLines(decode(large_output$numpy()[1,]), "data/more.txt")
+large_output <- generate(model, dummy_input, 1000)
+writeLines(decode(large_output$numpy()[1,]), "data/more.txt")
 
 # save model
-save_model_weights_tf(model, "checkpoints/gpt.ckpt")
+#save_model_weights_tf(model, "checkpoints/gpt.ckpt")
+#save_model_tf(model, "checkpoints/small")
+
+# load model
+#model <- load_model_tf("checkpoints/small")
+#evaluate(model, dataset_val)
