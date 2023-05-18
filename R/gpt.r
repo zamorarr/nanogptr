@@ -319,10 +319,20 @@ compile(
   loss = loss_sparse_categorical_crossentropy(from_logits = TRUE),
   optimizer = optimizer_adam(learning_rate))
 
-history <- fit(model, dataset_train, epochs = max_epochs, validation_data = dataset_val)
+# callbacks
+lr_reduce <- callback_reduce_lr_on_plateau(factor = 0.5, patience = 3,
+                                           min_lr = learning_rate/10)
+early_stopping <- callback_early_stopping(patience = 5)
+
+# fit
+history <- fit(model, dataset_train, epochs = max_epochs, validation_data = dataset_val,
+               callbacks = list(lr_reduce, early_stopping))
 
 generate <- function(model, inputs, max_new_tokens = 100) {
   # inputs is (B,T) array of indices in current context
+  batch_size <- nrow(inputs)
+
+  # create progress bar
   pb <- progress::progress_bar$new(
     total = max_new_tokens,
     format = "[:bar] :current/:total (:percent) eta: :eta")
@@ -335,10 +345,12 @@ generate <- function(model, inputs, max_new_tokens = 100) {
     inputs_cropped <- inputs[,start:context_size]
 
     # get the predictions
-    logits <- model(inputs_cropped) # {B, T, C}
+    #logits <- model(inputs_cropped) # {B, T, C}
+    logits <- predict(model, inputs_cropped)
 
     # focus on last context token (bigram model)
     logits <- logits[,dim(logits)[2],] # {B, C}
+    logits <- matrix(logits, nrow = batch_size)
 
     # sample from distribution
     idx_next <- tf$random$categorical(logits, 1L) # {B, 1}
