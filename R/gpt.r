@@ -314,19 +314,44 @@ model <- keras_model(inputs, output, name = "gpt_model")
 #model((dataset |> dataset_take(1) |> dataset_collect())[[1]][[1]][,1:3]) |> dim()
 plot(model, show_shapes = TRUE)
 
-compile(
-  model,
-  loss = loss_sparse_categorical_crossentropy(from_logits = TRUE),
-  optimizer = optimizer_adam(learning_rate))
-
 # callbacks
 lr_reduce <- callback_reduce_lr_on_plateau(factor = 0.5, patience = 3,
                                            min_lr = learning_rate/10)
 early_stopping <- callback_early_stopping(patience = 5)
+cosine_decay <- new_learning_rate_schedule_class(
+  "CosineDecay",
+  initialize = function(init_lr, decay_steps, alpha = 0) {
+    # min_lr = init_lr*alpha
+    self$init_lr <- init_lr
+    self$decay_steps <- decay_steps
+    self$alpha <- alpha
+  },
+  call = function(step) {
+    step <- min(step, self$decay_steps)
+    step_ratio <- step/self$decay_steps
+    cosine_decay <- 0.5*(1 + cos(pi*step_ratio))
+    decayed <- (1 - self$alpha)*cosine_decay + self$alpha
+    self$init_lr*decayed
+  },
+  get_config = function() {
+    config <- super$get_config()
+    config$init_lr = self$init_lr
+    config$decay_steps = self$decay_steps
+    config$alpha = self$alpha
+    config
+  }
+)
+#keras::learning_rate_schedule_cosine_decay()
+
+# compile
+compile(
+  model,
+  loss = loss_sparse_categorical_crossentropy(from_logits = TRUE),
+  optimizer = optimizer_adam(cosine_decay(learning_rate, length(dataset_train)*max_epochs, alpha = 0.1)))
 
 # fit
-history <- fit(model, dataset_train, epochs = max_epochs, validation_data = dataset_val,
-               callbacks = list(lr_reduce, early_stopping))
+history <- fit(model, dataset_train, epochs = max_epochs, validation_data = dataset_val)
+               #callbacks = list(lr_reduce, early_stopping))
 
 generate <- function(model, inputs, max_new_tokens = 100) {
   # inputs is (B,T) array of indices in current context
