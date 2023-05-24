@@ -9,10 +9,10 @@ tf$test$is_gpu_available()
 # hyper params
 batch_size <- 12 # number of sequences to process
 block_size <- 64L # max context length for predictions
-embed_size <- 128L
-attention_heads <- 4L
+embed_size <- 64L
+attention_heads <- 3L
 #attention_size <- 6L # size of attention output features = embed_size %/% attention_heads
-num_transformers <- 4L
+num_transformers <- 3L
 dropout_rate = 0.0
 learning_rate <- 3E-4
 max_epochs <- 10L
@@ -59,7 +59,8 @@ build_pipeline <- function(x) {
     }) |>
     dataset_shuffle(1000) |>
     dataset_batch(batch_size, drop_remainder = TRUE) |>
-    dataset_prefetch()
+    dataset_prefetch() |>
+    dataset_cache()
 }
 
 dataset_train <- build_pipeline(train_data)
@@ -78,7 +79,7 @@ layer_pos_embedding <- new_layer_class(
   call = function(inputs) {
     # get context size of inputs (can be less than layer context size)
     shp <- tf$shape(inputs)
-    input_dim <- shp[2]
+    input_dim <- shp[2] # bug here if slicing is set to python mode
 
     # create positions input
     positions <- tf$range(input_dim)
@@ -308,7 +309,7 @@ output <- transformer_blocks |>
   layer_dense(units = vocab_size, name = "linear_head")
 
 model <- keras_model(inputs, output, name = "gpt_model")
-
+model$count_params()
 
 #model((dataset |> dataset_take(1) |> dataset_collect())[[1]][[1]]) |> dim()
 #model((dataset |> dataset_take(1) |> dataset_collect())[[1]][[1]][,1:3]) |> dim()
@@ -334,7 +335,10 @@ cosine_decay <- new_learning_rate_schedule_class(
     self$init_lr*decayed
   },
   get_config = function() {
-    config <- super$get_config()
+    # get_config() is abstract in the parent class
+    # must override, not inherit
+    # config <- super$get_config()
+    config <- list()
     config$init_lr = self$init_lr
     config$decay_steps = self$decay_steps
     config$alpha = self$alpha
@@ -347,35 +351,52 @@ cosine_decay <- new_learning_rate_schedule_class(
 compile(
   model,
   loss = loss_sparse_categorical_crossentropy(from_logits = TRUE),
-  optimizer = optimizer_adam(cosine_decay(learning_rate, length(dataset_train)*max_epochs, alpha = 0.1)))
+  optimizer = optimizer_adam(cosine_decay(learning_rate, length(dataset_train)*max_epochs, alpha = 0.1))
+)
 
 # fit
-history <- fit(model, dataset_train, epochs = max_epochs, validation_data = dataset_val)
-               #callbacks = list(lr_reduce, early_stopping))
+history <- fit(
+  model,
+  dataset_train,
+  validation_data = dataset_val,
+  epochs = max_epochs,
+  callbacks = list(callback_model_checkpoint("checkpoints/transformer.keras", save_best_only = TRUE))
+)
 
-generate <- function(model, inputs, max_new_tokens = 100) {
+model <- load_model_hdf5("checkpoints/transformer.keras")
+
+generate <- tf_function(function(model, inputs, max_new_tokens = 100) {
+  withr::local_options(tensorflow.extract.style = "python")
+
   # inputs is (B,T) array of indices in current context
-  batch_size <- nrow(inputs)
+  #batch_size <- nrow(inputs)
 
   # create progress bar
-  pb <- progress::progress_bar$new(
-    total = max_new_tokens,
-    format = "[:bar] :current/:total (:percent) eta: :eta")
+  #pb <- progress::progress_bar$new(
+  #  total = max_new_tokens,
+  #  format = "[:bar] :current/:total (:percent) eta: :eta")
 
-  for (i in seq_len(max_new_tokens)) {
-    pb$tick()
+  for (i in tf$range(as.integer(max_new_tokens))) {
+  #for (i in seq_len(max_new_tokens)) {
+    #pb$tick()
+
     # crop inputs to last block_size tokens
-    context_size <- ncol(inputs)
-    start <- max(context_size - block_size + 1,1)
+    context_size <- tf$shape(inputs)[1]
+    start <- tf$maximum(context_size - block_size - 1L, 0L)
     inputs_cropped <- inputs[,start:context_size]
 
     # get the predictions
-    #logits <- model(inputs_cropped) # {B, T, C}
-    logits <- predict(model, inputs_cropped)
+    print(inputs_cropped)
+    logits <- model(inputs_cropped) # {B, T, C}
+    print('dolo')
+    #logits <- predict(model, inputs_cropped)
+    print(logits)
+    return(0)
 
     # focus on last context token (bigram model)
-    logits <- logits[,dim(logits)[2],] # {B, C}
-    logits <- matrix(logits, nrow = batch_size)
+    logits <- logits[,-1L,]
+    #logits <- logits[,dim(logits)[2],] # {B, C}
+    #logits <- matrix(logits, nrow = batch_size)
 
     # sample from distribution
     idx_next <- tf$random$categorical(logits, 1L) # {B, 1}
@@ -386,7 +407,7 @@ generate <- function(model, inputs, max_new_tokens = 100) {
 
   # return final
   inputs
-}
+})
 
 # dummy input
 dummy_prompt <- encode("BOBBY:\n")
