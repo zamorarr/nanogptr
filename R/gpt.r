@@ -363,35 +363,36 @@ history <- fit(
   callbacks = list(callback_model_checkpoint("checkpoints/transformer.keras", save_best_only = TRUE))
 )
 
-model <- load_model_hdf5("checkpoints/transformer.keras")
+#model <- load_model_hdf5("checkpoints/transformer.keras")
 
 generate <- tf_function(function(model, inputs, max_new_tokens = 100) {
-  withr::local_options(tensorflow.extract.style = "python")
+  #withr::local_options(tensorflow.extract.style = "python")
 
   # inputs is (B,T) array of indices in current context
   #batch_size <- nrow(inputs)
+  #batch_size <- tf$shape(inputs)[1]
 
   # create progress bar
   #pb <- progress::progress_bar$new(
   #  total = max_new_tokens,
   #  format = "[:bar] :current/:total (:percent) eta: :eta")
 
+  tfautograph::ag_while_opts(shape_invariants = list(
+    inputs = tf$TensorShape(list(1L, NULL)),
+    i = tf$TensorShape(list())
+  ))
+
   for (i in tf$range(as.integer(max_new_tokens))) {
   #for (i in seq_len(max_new_tokens)) {
     #pb$tick()
 
     # crop inputs to last block_size tokens
-    context_size <- tf$shape(inputs)[1]
-    start <- tf$maximum(context_size - block_size - 1L, 0L)
+    context_size <- tf$shape(inputs)[2]
+    start <- tf$maximum(context_size - block_size, 0L)
     inputs_cropped <- inputs[,start:context_size]
 
     # get the predictions
-    print(inputs_cropped)
     logits <- model(inputs_cropped) # {B, T, C}
-    print('dolo')
-    #logits <- predict(model, inputs_cropped)
-    print(logits)
-    return(0)
 
     # focus on last context token (bigram model)
     logits <- logits[,-1L,]
@@ -416,7 +417,8 @@ dummy_output <- generate(model, dummy_input, 100)
 cat(decode(dummy_output$numpy()[1,]))
 
 # write larger output
-large_output <- generate(model, dummy_input, 1000)
+large_output <- generate(model, dummy_input, 10000)
+cat(decode(large_output$numpy()[1,]))
 writeLines(decode(large_output$numpy()[1,]), "data/more.txt")
 
 # save model
