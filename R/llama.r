@@ -1,55 +1,19 @@
-# following: https://blogs.rstudio.com/ai/posts/2023-05-25-llama-tensorflow-keras/
+#' Load LLaMA tokenizer
+#' @param path to tokenizer.model file
+#' @export
+llama_tokenizer <- function(path) {
+  tf_text <- reticulate::import("tensorflow_text")
+  path <- normalizePath(path, mustWork = TRUE)
 
-library(keras)
-library(tensorflow)
-library(tfdatasets)
-
-Sys.setenv("XLA_FLAGS" = "--xla_gpu_cuda_data_dir=/usr/lib/cuda")
-reticulate::use_condaenv("r-reticulate")
-tf$test$is_gpu_available()
-
-model_path <- normalizePath("~/data/llama/7B")
-
-# convert weights to numpy
-# reticulate::py_install("torch", pip = TRUE)
-#torch <- reticulate::import("torch", convert = FALSE)
-
-# out of memory?
-#write_weights <- function(path) {
-#  pretrained_weights <- torch$load(
-#    file.path(path, "consolidated.00.pth"),
-#    map_location = "cpu"
-#    )
-#}
-
-# params
-#params <- jsonlite::read_json(file.path(model_path, "params.json"))
-
-# lite params for testing
-params <- list(
-  dim = 20L,
-  multiple_of = 5L,
-  n_heads = 2L,
-  n_layers = 7L,
-  norm_eps = 1E-6,
-  vocab_size = -1L
-)
-
-# tokenizer
-# pip install -U tensorflow_text==2.11.0
-tf_text <- reticulate::import("tensorflow_text")
-tokenizer <- tf_text$SentencepieceTokenizer(
-  tf$io$gfile$GFile(normalizePath("~/data/llama/tokenizer.model"), "rb")$read(),
-  add_bos = TRUE,
-  add_eos = FALSE
-)
-
-tokenizer$tokenize("The best way to attract bees")
-tokenizer$vocab_size()$numpy()
+  tokenizer <-tf$io$gfile$GFile(path, "rb")$read()
+  tf_text$SentencepieceTokenizer(tokenizer, add_bos = TRUE, add_eos = FALSE)
+}
 
 # custom layers
-layer_rmsnorm <- new_layer_class(
-  "RMSNorm",
+
+#' LLaMA RMS Norm Layer
+layer_llama_rmsnorm <- new_layer_class(
+  "LlamaRMSNorm",
   initialize = function(eps = 1E-6, ..., block_id = NULL, feeds_into = NULL) {
     super$initialize(...)
     self$eps <- eps
@@ -61,7 +25,7 @@ layer_rmsnorm <- new_layer_class(
     # input_shape = (batch_size, seqlen, model_dim)
     # w_shape = (1, 1, model_dim)
     size <- length(input_shape)
-    model_dim <- tf$constant(tail(input_shape, 1), shape = shape(1))
+    model_dim <- tf$constant(tail(input_shape, 1), shape = keras::shape(1))
     paddings <- tf$constant(array(c(size - 1L, 0L), dim = c(1, 2)))
     w_shape = tf$pad(model_dim, paddings, constant_values = 1L)
     self$w <- self$add_weight(
@@ -95,8 +59,8 @@ layer_rmsnorm <- new_layer_class(
   }
 )
 
-layer_feedforward <- new_layer_class(
-  "FeedForward",
+layer_llama_feedforward <- new_layer_class(
+  "LlamaFeedForward",
   initialize = function(hidden_dim, multiple_of = 256L, ..., block_id = NULL) {
     super$initialize(...)
 
@@ -113,9 +77,9 @@ layer_feedforward <- new_layer_class(
   build = function(input_shape) {
     output_dim <- tail(input_shape, 1)
     # layers
-    self$w1 <- layer_dense(units = self$hidden_dim, use_bias = FALSE)
-    self$w2 <- layer_dense(units = output_dim, use_bias = FALSE)
-    self$w3 <- layer_dense(units = self$hidden_dim, use_bias = FALSE)
+    self$w1 <- keras::layer_dense(units = self$hidden_dim, use_bias = FALSE)
+    self$w2 <- keras::layer_dense(units = output_dim, use_bias = FALSE)
+    self$w3 <- keras::layer_dense(units = self$hidden_dim, use_bias = FALSE)
     super$build(input_shape)
   },
 
@@ -134,7 +98,7 @@ layer_feedforward <- new_layer_class(
   }
 )
 
-make_mask <- function(seqlen, dtype = k_floatx()) {
+llama_make_mask <- function(seqlen, dtype = k_floatx()) {
   x <- tf$range(seqlen)
   row_index <- x[, tf$newaxis]
   col_index <- x[tf$newaxis, ]
@@ -148,17 +112,17 @@ make_mask <- function(seqlen, dtype = k_floatx()) {
   mask[tf$newaxis, tf$newaxis, , ]
 }
 
-layer_multi_self_attention <- new_layer_class(
-  "MultiSelfAttention",
+layer_llama_multi_self_attention <- new_layer_class(
+  "LlamaMultiSelfAttention",
   initialize = function(num_heads, head_size, ..., block_id = NULL) {
     super$initialize(...)
 
     # layers
     units <- num_heads * head_size
-    self$wq <- layer_dense(units = units, use_bias = FALSE)
-    self$wk <- layer_dense(units = units, use_bias = FALSE)
-    self$wv <- layer_dense(units = units, use_bias = FALSE)
-    self$wo <- layer_dense(units = units, use_bias = FALSE)
+    self$wq <- keras::layer_dense(units = units, use_bias = FALSE)
+    self$wk <- keras::layer_dense(units = units, use_bias = FALSE)
+    self$wv <- keras::layer_dense(units = units, use_bias = FALSE)
+    self$wo <- keras::layer_dense(units = units, use_bias = FALSE)
 
     self$num_heads <- num_heads
     self$head_size <- head_size
@@ -188,9 +152,9 @@ layer_multi_self_attention <- new_layer_class(
 
     # calculate attention scores
     scores <- tf$matmul(q, k)/tf$sqrt(1.0*self$head_size) # {batch_size, num_heads, seqlen, seqlen}
-    mask <- make_mask(seqlen, dtype = scores$dtype) # {1, 1, seqlen, seqlen}
+    mask <- llama_make_mask(seqlen, dtype = scores$dtype) # {1, 1, seqlen, seqlen}
     scores <- scores + mask
-    scores <- k_softmax(scores) # {batch_size, num_heads, seqlen, seqlen}
+    scores <- keras::k_softmax(scores) # {batch_size, num_heads, seqlen, seqlen}
 
     # calculate value
     output <- tf$matmul(scores, v) # {batch_size, num_heads, seqlen, head_size}
@@ -214,26 +178,26 @@ layer_multi_self_attention <- new_layer_class(
   }
 )
 
-layer_transformer_block <- new_layer_class(
-  "TransformerBlock",
-  initialize = function(num_heads, head_size, multiple_of, norm_eps = k_epsilon, ..., block_id = NULL) {
+layer_llama_transformer_block <- new_layer_class(
+  "LlamaTransformerBlock",
+  initialize = function(num_heads, head_size, multiple_of, norm_eps = keras::k_epsilon(), ..., block_id = NULL) {
     super$initialize(...)
 
     # self attention
-    self$sa <- layer_multi_self_attention(
+    self$sa <- layer_llama_multi_self_attention(
       num_heads = num_heads,
       head_size = head_size,
       block_id = block_id)
 
     # feed forward
-    self$ffwd <- layer_feedforward(
+    self$ffwd <- layer_llama_feedforward(
       hidden_dim = 4*head_size*num_heads,
       multiple_of = multiple_of,
       block_id = block_id)
 
     # layer norms
-    self$sa_norm <- layer_rmsnorm(eps = norm_eps, block_id = block_id, feeds_into = "attention")
-    self$ffwd_norm <- layer_rmsnorm(eps = norm_eps, block_id = block_id, feeds_into = "ffn")
+    self$sa_norm <- layer_llama_rmsnorm(eps = norm_eps, block_id = block_id, feeds_into = "attention")
+    self$ffwd_norm <- layer_llama_rmsnorm(eps = norm_eps, block_id = block_id, feeds_into = "ffn")
 
     # config
     self$num_heads <- num_heads
@@ -260,43 +224,34 @@ layer_transformer_block <- new_layer_class(
 )
 
 # model
-inputs <- layer_input(shape = shape(NA), name = "input")
-token_embeddings <- inputs |>
-  layer_embedding(
-  input_dim = tokenizer$vocab_size(),
-  output_dim = params$dim,
-  name = "token_embeddings"
-)
+#' Create LLaMA model
+#' @param params
+#' @export
+llama_model <- function(params) {
+  inputs <- keras::layer_input(shape = keras::shape(NA), name = "input")
 
-transformer_blocks <- token_embeddings
-for (i in (seq_len(params$n_layers) - 1L)) {
-  transformer_blocks <- transformer_blocks |>
-    layer_transformer_block(
-      num_heads = params$n_heads,
-      head_size = params$dim %/% params$n_heads,
-      multiple_of = params$multiple_of,
-      norm_eps = params$norm_eps,
-      block_id = i,
-      name = paste0("transformer_", i))
+  token_embeddings <- inputs |>
+    keras::layer_embedding(
+      input_dim = params$vocab_size,
+      output_dim = params$dim,
+      name = "token_embeddings"
+    )
+
+  transformer_blocks <- token_embeddings
+  for (i in (seq_len(params$n_layers) - 1L)) {
+    transformer_blocks <- transformer_blocks |>
+      layer_llama_transformer_block(
+        num_heads = params$n_heads,
+        head_size = params$dim %/% params$n_heads,
+        multiple_of = params$multiple_of,
+        norm_eps = params$norm_eps,
+        block_id = i,
+        name = paste0("transformer_", i))
+  }
+
+  output <- transformer_blocks |>
+    layer_llama_rmsnorm(block_id = -1, eps = params$norm_eps, name = "rmsnorm") |>
+    keras::layer_dense(units = params$vocab_size, use_bias = FALSE, name = "linear_head")
+
+  keras::keras_model(inputs, output, name = "llama_model")
 }
-
-output <- transformer_blocks |>
-  layer_rmsnorm(block_id = -1, eps = params$norm_eps) |>
-  layer_dense(units = tokenizer$vocab_size(), use_bias = FALSE, name = "linear_head")
-
-model <- keras_model(inputs, output, name = "llama_model")
-model$count_params()
-plot(model, show_shapes = TRUE)
-
-# compile
-compile(
-  model,
-  #loss = loss_sparse_categorical_crossentropy(from_logits = TRUE),
-  jit_compile = TRUE)
-
-# example
-(c("The best way to attract bees", "The tree is green") |>
-  tokenizer$tokenize())$to_tensor() |>
-  token_embeddings() |>
-  layer_multi_self_attention(num_heads = 32L, head_size = 128L) |>
-  tf$shape()

@@ -38,9 +38,14 @@ vocab_size <- length(chars)
 stoi <- setNames(seq_along(chars) - 1L, chars)
 encode <- function(x) unname(stoi[strsplit(x, "")[[1]]]) # note not zero-indexed
 decode <- function(x) paste0(chars[x + 1L], collapse = "")
-
 # encode the entire dataset and store it in a tensor
 data <- tf$constant(encode(text), dtype = tf$dtypes$int64)
+
+# alternate mapping using keras text vectorization
+#text_vectorizer <- layer_text_vectorization(standardize = NULL, split = "character")
+#adapt(text_vectorizer, text)
+#data2 <- text_vectorizer(text)
+#setdiff(get_vocabulary(text_vectorizer, FALSE), chars)
 
 # split into train/val sets
 n <- as.integer(0.9*length(data))
@@ -378,8 +383,8 @@ generate <- tf_function(function(model, inputs, max_new_tokens = 100) {
   #  format = "[:bar] :current/:total (:percent) eta: :eta")
 
   tfautograph::ag_while_opts(shape_invariants = list(
-    inputs = tf$TensorShape(list(1L, NULL)),
-    i = tf$TensorShape(list())
+    inputs = tf$TensorShape(list(1L, NULL))
+    #i = tf$TensorShape(list())
   ))
 
   for (i in tf$range(as.integer(max_new_tokens))) {
