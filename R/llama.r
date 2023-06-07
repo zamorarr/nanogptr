@@ -142,6 +142,8 @@ layer_llama_multi_self_attention <- new_layer_class(
 
     # embed positional information in query and key
     # TODO
+    # q <- rotary_embedding(q)
+    # k <- rotary_embedding(k)
 
     # reshape
     # move heads out of last two axes so that matmuls
@@ -223,9 +225,8 @@ layer_llama_transformer_block <- new_layer_class(
   }
 )
 
-# model
 #' Create LLaMA model
-#' @param params
+#' @param params list of params
 #' @export
 llama_model <- function(params) {
   inputs <- keras::layer_input(shape = keras::shape(NA), name = "input")
