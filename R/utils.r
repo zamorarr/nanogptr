@@ -1,3 +1,15 @@
+prettify_size <- function(df) {
+  #df$ratio <- sprintf("%10.4f", 100*df$params/out$total)
+  bytes <- df$params*4 # fp32 = 4 bytes per param
+  bytes_and_buffers <- bytes + 2*bytes # adam optimizer stores an additional 2 buffers per param
+  df$mem_inference <- prettyunits::pretty_bytes(bytes)
+  df$mem_train <- prettyunits::pretty_bytes(bytes_and_buffers)
+
+  formatter <- scales::label_number(0.1, scale_cut = scales::cut_short_scale())
+  df$params <- formatter(df$params)
+  df
+}
+
 #' Estimate GPT Total Parameters
 #' @param vocab_size number of vocabulary tokens
 #' @param n_layer number of transformer layers
@@ -5,10 +17,13 @@
 #' @param n_embed size of feature (embedding) dimension
 #' @param block_size max context size for position encodings
 #' @examples
-#' gpt_params(50257, 12, 12, 768, 1024) # gpt2
+#' gpt_size(50257, 12, 12, 768, 1024) # gpt2
+#' gpt_size(50257, 24, 16, 1024, 1024) # gpt2-med
+#' gpt_size(50257, 36, 20, 1280, 1024) # gpt2-large
+#' gpt_size(50257, 48, 25, 1600, 1024) # gpt2-xl
 #'
 #' @export
-gpt_params <- function(vocab_size, n_layer, n_head, n_embed, block_size) {
+gpt_size <- function(vocab_size, n_layer, n_head, n_embed, block_size) {
   out <- list()
 
   # embeddings
@@ -41,7 +56,19 @@ gpt_params <- function(vocab_size, n_layer, n_head, n_embed, block_size) {
   # total
   out$total <- out$embedding + out$transformers + out$final
 
-  data.frame(name = names(out), params = unname(unlist(out)))
+  df <- data.frame(name = names(out), params = unname(unlist(out)))
+  prettify_size(df)
+}
+
+llama_params <- function(vocab_size, n_layer, n_head, n_embed, multiple_of = 256L, norm_eps = 1E-6) {
+  list(
+    dim = n_embed,
+    multiple_of = multiple_of,
+    n_heads = n_head,
+    n_layers = n_layer,
+    norm_eps = norm_eps,
+    vocab_size = vocab_size
+  )
 }
 
 #' Estimate LLaMA Total Parameters
@@ -51,12 +78,12 @@ gpt_params <- function(vocab_size, n_layer, n_head, n_embed, block_size) {
 #' @param n_embed size of feature (embedding) dimension
 #' @param multiple_of number to round feedfoward dimension to
 #' @examples
-#' llama_params(32000, 32, 32, 4096, 256) # llama-7B
-#' llama_params(32000, 40, 40, 5120, 256) # llama-13B
-#' llama_params(32000, 60, 52, 6656, 256) # llama-32.5B
-#' llama_params(32000, 80, 64, 8192, 256) # llama-65.2B
+#' llama_size(32000, 32, 32, 4096, 256) # llama-7B
+#' llama_size(32000, 40, 40, 5120, 256) # llama-13B
+#' llama_size(32000, 60, 52, 6656, 256) # llama-32.5B
+#' llama_size(32000, 80, 64, 8192, 256) # llama-65.2B
 #' @export
-llama_params <- function(vocab_size, n_layer, n_head, n_embed, multiple_of = 256L) {
+llama_size <- function(vocab_size, n_layer, n_head, n_embed, multiple_of = 256L) {
   out <- list()
 
   # embeddings
@@ -90,8 +117,7 @@ llama_params <- function(vocab_size, n_layer, n_head, n_embed, multiple_of = 256
   out$total <- out$embedding + out$transformers + out$final
 
   df <- data.frame(name = names(out), params = unname(unlist(out)))
-  df$ratio <- sprintf("%10.4f", 100*df$params/out$total)
-  df
+  prettify_size(df)
 }
 
 #llama_params(tokenizer$vocab_size()$numpy(), params$n_layers, params$n_heads, params$dim, params$multiple_of)
