@@ -54,8 +54,57 @@ compile(
   jit_compile = TRUE)
 
 # example
-(c("The best way to attract bees", "The tree is green") |>
-    tokenizer$tokenize())$to_tensor() |>
-  token_embeddings() |>
-  layer_multi_self_attention(num_heads = 32L, head_size = 128L) |>
-  tf$shape()
+generate <- tf_function(function(model, inputs, max_new_tokens = 100) {
+  block_size <- 1024L
+  #withr::local_options(tensorflow.extract.style = "python")
+
+  # inputs is (B,T) array of indices in current context
+  #batch_size <- nrow(inputs)
+  #batch_size <- tf$shape(inputs)[1]
+
+  # create progress bar
+  #pb <- progress::progress_bar$new(
+  #  total = max_new_tokens,
+  #  format = "[:bar] :current/:total (:percent) eta: :eta")
+
+  tfautograph::ag_while_opts(shape_invariants = list(
+    inputs = tf$TensorShape(list(1L, NULL))
+    #i = tf$TensorShape(list())
+  ))
+
+  for (i in tf$range(as.integer(max_new_tokens))) {
+    #for (i in seq_len(max_new_tokens)) {
+    #pb$tick()
+
+    # crop inputs to last block_size tokens
+    context_size <- tf$shape(inputs)[2]
+    start <- tf$maximum(context_size - block_size, 0L)
+    inputs_cropped <- inputs[,start:context_size]
+
+    # get the predictions
+    logits <- model(inputs_cropped) # {B, T, C}
+
+    # focus on last context token (bigram model)
+    logits <- logits[,-1L,]
+    #logits <- logits[,dim(logits)[2],] # {B, C}
+    #logits <- matrix(logits, nrow = batch_size)
+
+    # sample from distribution
+    idx_next <- tf$random$categorical(logits, 1L) # {B, 1}
+
+    # append sampled index to running sequence
+    inputs <- keras::k_concatenate(list(inputs, idx_next), axis = 2) # {B, T+1}
+  }
+
+  # return final
+  inputs
+})
+
+input <- tokenizer$tokenize("The best way to attract bees") |>
+  tf$cast(dtype = tf$dtypes$int64) |>
+  tf$expand_dims(0L)
+
+generate(model, input, max_new_tokens = 10L) |>
+  tf$cast(dtype = tf$dtypes$int32) |>
+  tokenizer$detokenize() |>
+  as.character()
