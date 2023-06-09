@@ -55,7 +55,7 @@ compile(
 
 # example
 generate <- tf_function(function(model, inputs, max_new_tokens = 100) {
-  block_size <- 1024L
+  block_size <- 2048L
   #withr::local_options(tensorflow.extract.style = "python")
 
   # inputs is (B,T) array of indices in current context

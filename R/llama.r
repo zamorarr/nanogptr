@@ -129,7 +129,7 @@ layer_llama_multi_self_attention <- new_layer_class(
     self$block_id <- block_id
   },
 
-  call = function(input) {
+  call = function(input, freqs = NULL) {
     # input = {batch_size, seq_len, n_features = head_size*num_heads}
     c(batch_size, seqlen, n_features) %<-% tf$unstack(tf$shape(input))
 
@@ -141,9 +141,9 @@ layer_llama_multi_self_attention <- new_layer_class(
     v <- input |> self$wv() |> tf$reshape(split_heads_shape)
 
     # embed positional information in query and key
-    # TODO
-    # q <- rotary_embedding(q)
-    # k <- rotary_embedding(k)
+    if (is.null(freqs)) freqs <- rotation_freqs(seqlen, self$head_size)
+    q <- rotate_eff(q, freqs)
+    k <- rotate_eff(k, freqs)
 
     # reshape
     # move heads out of last two axes so that matmuls
@@ -208,9 +208,9 @@ layer_llama_transformer_block <- new_layer_class(
     self$block_id <- block_id
   },
 
-  call = function(input) {
+  call = function(input, freqs = NULL) {
     # residual connection
-    x <- input + self$sa(self$sa_norm(input))
+    x <- input + self$sa(self$sa_norm(input), freqs)
     x <- x + self$ffwd(self$ffwd_norm(x))
     x
   },
@@ -229,6 +229,11 @@ layer_llama_transformer_block <- new_layer_class(
 #' @param params list of params
 #' @export
 llama_model <- function(params) {
+  # compute rotational embedding frequencies
+  max_context_size <- 2048L
+  head_size <- params$dim %/% params$n_heads
+  precomputed_freqs <- rotation_freqs(max_context_size,  head_size)
+
   inputs <- keras::layer_input(shape = keras::shape(NA), name = "input")
 
   token_embeddings <- inputs |>
@@ -240,14 +245,14 @@ llama_model <- function(params) {
 
   transformer_blocks <- token_embeddings
   for (i in (seq_len(params$n_layers) - 1L)) {
-    transformer_blocks <- transformer_blocks |>
-      layer_llama_transformer_block(
-        num_heads = params$n_heads,
-        head_size = params$dim %/% params$n_heads,
-        multiple_of = params$multiple_of,
-        norm_eps = params$norm_eps,
-        block_id = i,
-        name = paste0("transformer_", i))
+    block <- layer_llama_transformer_block(
+      num_heads = params$n_heads,
+      head_size =  head_size,
+      multiple_of = params$multiple_of,
+      norm_eps = params$norm_eps,
+      block_id = i,
+      name = paste0("transformer_", i))
+    transformer_blocks <- block(transformer_blocks, freqs = precomputed_freqs)
   }
 
   output <- transformer_blocks |>
