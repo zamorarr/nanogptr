@@ -93,8 +93,7 @@ llama_size <- function(vocab_size, n_layer, n_head, n_embed, multiple_of = 256L)
   # attention blocks
   out[["attention/rmsnorm"]] <- n_embed
   out[["attention/kqvo"]] <- n_embed * 4*n_embed
-  out[["attention/rope"]] <- 0 # TODO
-  out[["attention"]] <- out[["attention/rmsnorm"]] + out[["attention/kqvo"]] + out[["attention/rope"]]
+  out[["attention"]] <- out[["attention/rmsnorm"]] + out[["attention/kqvo"]]
 
   # MLP blocks
   ffw_size <- round(2/3*4*n_embed/multiple_of)*multiple_of
