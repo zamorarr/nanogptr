@@ -12,7 +12,7 @@ llama_tokenizer <- function(path) {
 # custom layers
 
 #' LLaMA RMS Norm Layer
-layer_llama_rmsnorm <- new_layer_class(
+layer_llama_rmsnorm <- keras::new_layer_class(
   "LlamaRMSNorm",
   initialize = function(eps = 1E-6, ..., block_id = NULL, feeds_into = NULL) {
     super$initialize(...)
@@ -59,7 +59,7 @@ layer_llama_rmsnorm <- new_layer_class(
   }
 )
 
-layer_llama_feedforward <- new_layer_class(
+layer_llama_feedforward <- keras::new_layer_class(
   "LlamaFeedForward",
   initialize = function(hidden_dim, multiple_of = 256L, ..., block_id = NULL) {
     super$initialize(...)
@@ -112,7 +112,7 @@ llama_make_mask <- function(seqlen, dtype = k_floatx()) {
   mask[tf$newaxis, tf$newaxis, , ]
 }
 
-layer_llama_multi_self_attention <- new_layer_class(
+layer_llama_multi_self_attention <- keras::new_layer_class(
   "LlamaMultiSelfAttention",
   initialize = function(num_heads, head_size, ..., block_id = NULL) {
     super$initialize(...)
@@ -129,7 +129,7 @@ layer_llama_multi_self_attention <- new_layer_class(
     self$block_id <- block_id
   },
 
-  call = function(input, freqs = NULL) {
+  call = function(input, rots = NULL) {
     # input = {batch_size, seq_len, n_features = head_size*num_heads}
     c(batch_size, seqlen, n_features) %<-% tf$unstack(tf$shape(input))
 
@@ -141,9 +141,9 @@ layer_llama_multi_self_attention <- new_layer_class(
     v <- input |> self$wv() |> tf$reshape(split_heads_shape)
 
     # embed positional information in query and key
-    if (is.null(freqs)) freqs <- rotation_freqs(seqlen, self$head_size)
-    q <- rotate_eff(q, freqs)
-    k <- rotate_eff(k, freqs)
+    if (is.null(rots)) rots <- rope_matrix(seqlen, self$head_size)
+    q <- rope(q, rots)
+    k <- rope(k, rots)
 
     # reshape
     # move heads out of last two axes so that matmuls
@@ -180,7 +180,7 @@ layer_llama_multi_self_attention <- new_layer_class(
   }
 )
 
-layer_llama_transformer_block <- new_layer_class(
+layer_llama_transformer_block <- keras::new_layer_class(
   "LlamaTransformerBlock",
   initialize = function(num_heads, head_size, multiple_of, norm_eps = keras::k_epsilon(), ..., block_id = NULL) {
     super$initialize(...)
@@ -208,9 +208,9 @@ layer_llama_transformer_block <- new_layer_class(
     self$block_id <- block_id
   },
 
-  call = function(input, freqs = NULL) {
+  call = function(input, rots = NULL) {
     # residual connection
-    x <- input + self$sa(self$sa_norm(input), freqs)
+    x <- input + self$sa(self$sa_norm(input), rots)
     x <- x + self$ffwd(self$ffwd_norm(x))
     x
   },
@@ -232,7 +232,7 @@ llama_model <- function(params) {
   # compute rotational embedding frequencies
   max_context_size <- 2048L
   head_size <- params$dim %/% params$n_heads
-  precomputed_freqs <- rotation_freqs(max_context_size,  head_size)
+  rots <- rope_matrix(max_context_size,  head_size)
 
   inputs <- keras::layer_input(shape = keras::shape(NA), name = "input")
 
@@ -252,7 +252,7 @@ llama_model <- function(params) {
       norm_eps = params$norm_eps,
       block_id = i,
       name = paste0("transformer_", i))
-    transformer_blocks <- block(transformer_blocks, freqs = precomputed_freqs)
+    transformer_blocks <- block(transformer_blocks, rots = rots)
   }
 
   output <- transformer_blocks |>

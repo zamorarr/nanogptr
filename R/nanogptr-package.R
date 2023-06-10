@@ -9,7 +9,6 @@
 # }
 
 ## usethis namespace: start
-#' @importFrom keras new_layer_class
 #' @importFrom zeallot %<-%
 ## usethis namespace: end
 NULL

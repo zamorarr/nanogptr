@@ -22,5 +22,8 @@ Estimate GPT Total Parameters
 }
 \examples{
 gpt_size(50257, 12, 12, 768, 1024) # gpt2
+gpt_size(50257, 24, 16, 1024, 1024) # gpt2-med
+gpt_size(50257, 36, 20, 1280, 1024) # gpt2-large
+gpt_size(50257, 48, 25, 1600, 1024) # gpt2-xl
 
 }
