@@ -14,11 +14,9 @@ llama_tokenizer <- function(path) {
 #' LLaMA RMS Norm Layer
 layer_llama_rmsnorm <- keras::new_layer_class(
   "LlamaRMSNorm",
-  initialize = function(eps = 1E-6, ..., block_id = NULL, feeds_into = NULL) {
+  initialize = function(eps = 1E-6, ...) {
     super$initialize(...)
     self$eps <- eps
-    self$block_id <- block_id
-    self$feeds_into <- feeds_into
   },
 
   build = function(input_shape) {
@@ -51,7 +49,7 @@ layer_llama_rmsnorm <- keras::new_layer_class(
 
   get_config = function() {
     config <- super$get_config()
-    params <- c("eps", "block_id", "feeds_into")
+    params <- c("eps")
     for (p in params) {
       config[[p]] <- self[[p]]
     }
@@ -61,11 +59,11 @@ layer_llama_rmsnorm <- keras::new_layer_class(
 
 layer_llama_feedforward <- keras::new_layer_class(
   "LlamaFeedForward",
-  initialize = function(hidden_dim, output_dim, multiple_of = 256L, ..., block_id = NULL) {
+  initialize = function(output_dim, multiple_of = 256L, ...) {
     super$initialize(...)
 
-    # round hidden_dim
-    hidden_dim <- as.integer(hidden_dim * (2/3))
+    # compute hidden_dim
+    hidden_dim <- as.integer(4 * output_dim * (2/3))
     hidden_dim <- (hidden_dim + multiple_of - 1) %/% multiple_of
     hidden_dim <- hidden_dim * multiple_of
 
@@ -75,9 +73,7 @@ layer_llama_feedforward <- keras::new_layer_class(
     self$w3 <- keras::layer_dense(units = hidden_dim, use_bias = FALSE, name = "w3")
 
     # config
-    self$hidden_dim <- hidden_dim
     self$output_dim <- output_dim
-    self$block_id <- block_id
   },
 
   call = function(x) {
@@ -87,7 +83,7 @@ layer_llama_feedforward <- keras::new_layer_class(
 
   get_config = function() {
     config <- super$get_config()
-    params <- c("hidden_dim", "output_dim", "block_id")
+    params <- c("output_dim")
     for (p in params) {
       config[[p]] <- self[[p]]
     }
@@ -95,7 +91,7 @@ layer_llama_feedforward <- keras::new_layer_class(
   }
 )
 
-llama_make_mask <- function(seqlen, dtype = k_floatx()) {
+llama_make_mask <- function(seqlen, dtype = keras::k_floatx()) {
   x <- tf$range(seqlen)
   row_index <- x[, tf$newaxis]
   col_index <- x[tf$newaxis, ]
@@ -111,7 +107,7 @@ llama_make_mask <- function(seqlen, dtype = k_floatx()) {
 
 layer_llama_multi_self_attention <- keras::new_layer_class(
   "LlamaMultiSelfAttention",
-  initialize = function(num_heads, head_size, ..., block_id = NULL) {
+  initialize = function(num_heads, head_size, ...) {
     super$initialize(...)
 
     # layers
@@ -123,7 +119,6 @@ layer_llama_multi_self_attention <- keras::new_layer_class(
 
     self$num_heads <- num_heads
     self$head_size <- head_size
-    self$block_id <- block_id
   },
 
   call = function(input, rots = NULL) {
@@ -169,7 +164,7 @@ layer_llama_multi_self_attention <- keras::new_layer_class(
 
   get_config = function() {
     config <- super$get_config()
-    params <- c("num_heads", "head_size", "block_id")
+    params <- c("num_heads", "head_size")
     for (p in params) {
       config[[p]] <- self[[p]]
     }
@@ -179,33 +174,29 @@ layer_llama_multi_self_attention <- keras::new_layer_class(
 
 layer_llama_transformer_block <- keras::new_layer_class(
   "LlamaTransformerBlock",
-  initialize = function(num_heads, head_size, multiple_of, norm_eps = keras::k_epsilon(), ..., block_id = NULL) {
+  initialize = function(num_heads, head_size, multiple_of, norm_eps = keras::k_epsilon(), ...) {
     super$initialize(...)
 
     # self attention
     self$sa <- layer_llama_multi_self_attention(
       name = "attention",
       num_heads = num_heads,
-      head_size = head_size,
-      block_id = block_id)
+      head_size = head_size)
 
     # feed forward
     self$ffwd <- layer_llama_feedforward(
       name = "feed_forward",
-      hidden_dim = 4*head_size*num_heads,
       output_dim = head_size*num_heads,
-      multiple_of = multiple_of,
-      block_id = block_id)
+      multiple_of = multiple_of)
 
     # layer norms
-    self$sa_norm <- layer_llama_rmsnorm(eps = norm_eps, name = "attention_norm", block_id = block_id, feeds_into = "attention")
-    self$ffwd_norm <- layer_llama_rmsnorm(eps = norm_eps, name = "ffn_norm", block_id = block_id, feeds_into = "ffn")
+    self$sa_norm <- layer_llama_rmsnorm(eps = norm_eps, name = "attention_norm")
+    self$ffwd_norm <- layer_llama_rmsnorm(eps = norm_eps, name = "ffn_norm")
 
     # config
     self$num_heads <- num_heads
     self$head_size <- head_size
     self$norm_eps <- norm_eps
-    self$block_id <- block_id
   },
 
   call = function(input, rots = NULL) {
@@ -217,7 +208,7 @@ layer_llama_transformer_block <- keras::new_layer_class(
 
   get_config = function() {
     config <- super$get_config()
-    params <- c("num_heads", "head_size", "norm_eps", "block_id")
+    params <- c("num_heads", "head_size", "norm_eps")
     for (p in params) {
       config[[p]] <- self[[p]]
     }
@@ -250,13 +241,12 @@ llama_model <- function(params) {
       head_size =  head_size,
       multiple_of = params$multiple_of,
       norm_eps = params$norm_eps,
-      block_id = i,
       name = paste0("transformer_", i))
     transformer_blocks <- block(transformer_blocks, rots = rots)
   }
 
   output <- transformer_blocks |>
-    layer_llama_rmsnorm(block_id = -1, feeds_into = "", eps = params$norm_eps, name = "norm") |>
+    layer_llama_rmsnorm(eps = params$norm_eps, name = "norm") |>
     keras::layer_dense(units = params$vocab_size, use_bias = FALSE, name = "output")
 
   keras::keras_model(inputs, output, name = "llama_model")
