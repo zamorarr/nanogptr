@@ -61,7 +61,7 @@ layer_llama_rmsnorm <- keras::new_layer_class(
 
 layer_llama_feedforward <- keras::new_layer_class(
   "LlamaFeedForward",
-  initialize = function(hidden_dim, multiple_of = 256L, ..., block_id = NULL) {
+  initialize = function(hidden_dim, output_dim, multiple_of = 256L, ..., block_id = NULL) {
     super$initialize(...)
 
     # round hidden_dim
@@ -69,18 +69,15 @@ layer_llama_feedforward <- keras::new_layer_class(
     hidden_dim <- (hidden_dim + multiple_of - 1) %/% multiple_of
     hidden_dim <- hidden_dim * multiple_of
 
+    # dense layers
+    self$w1 <- keras::layer_dense(units = hidden_dim, use_bias = FALSE, name = "w1")
+    self$w2 <- keras::layer_dense(units = output_dim, use_bias = FALSE, name = "w2")
+    self$w3 <- keras::layer_dense(units = hidden_dim, use_bias = FALSE, name = "w3")
+
     # config
     self$hidden_dim <- hidden_dim
+    self$output_dim <- output_dim
     self$block_id <- block_id
-  },
-
-  build = function(input_shape) {
-    output_dim <- tail(input_shape, 1)
-    # layers
-    self$w1 <- keras::layer_dense(units = self$hidden_dim, use_bias = FALSE)
-    self$w2 <- keras::layer_dense(units = output_dim, use_bias = FALSE)
-    self$w3 <- keras::layer_dense(units = self$hidden_dim, use_bias = FALSE)
-    super$build(input_shape)
   },
 
   call = function(x) {
@@ -90,7 +87,7 @@ layer_llama_feedforward <- keras::new_layer_class(
 
   get_config = function() {
     config <- super$get_config()
-    params <- c("hidden_dim", "block_id")
+    params <- c("hidden_dim", "output_dim", "block_id")
     for (p in params) {
       config[[p]] <- self[[p]]
     }
@@ -119,10 +116,10 @@ layer_llama_multi_self_attention <- keras::new_layer_class(
 
     # layers
     units <- num_heads * head_size
-    self$wq <- keras::layer_dense(units = units, use_bias = FALSE)
-    self$wk <- keras::layer_dense(units = units, use_bias = FALSE)
-    self$wv <- keras::layer_dense(units = units, use_bias = FALSE)
-    self$wo <- keras::layer_dense(units = units, use_bias = FALSE)
+    self$wq <- keras::layer_dense(units = units, use_bias = FALSE, name = "wq")
+    self$wk <- keras::layer_dense(units = units, use_bias = FALSE, name = "wk")
+    self$wv <- keras::layer_dense(units = units, use_bias = FALSE, name = "wv")
+    self$wo <- keras::layer_dense(units = units, use_bias = FALSE, name = "wo")
 
     self$num_heads <- num_heads
     self$head_size <- head_size
@@ -187,19 +184,22 @@ layer_llama_transformer_block <- keras::new_layer_class(
 
     # self attention
     self$sa <- layer_llama_multi_self_attention(
+      name = "attention",
       num_heads = num_heads,
       head_size = head_size,
       block_id = block_id)
 
     # feed forward
     self$ffwd <- layer_llama_feedforward(
+      name = "feed_forward",
       hidden_dim = 4*head_size*num_heads,
+      output_dim = head_size*num_heads,
       multiple_of = multiple_of,
       block_id = block_id)
 
     # layer norms
-    self$sa_norm <- layer_llama_rmsnorm(eps = norm_eps, block_id = block_id, feeds_into = "attention")
-    self$ffwd_norm <- layer_llama_rmsnorm(eps = norm_eps, block_id = block_id, feeds_into = "ffn")
+    self$sa_norm <- layer_llama_rmsnorm(eps = norm_eps, name = "attention_norm", block_id = block_id, feeds_into = "attention")
+    self$ffwd_norm <- layer_llama_rmsnorm(eps = norm_eps, name = "ffn_norm", block_id = block_id, feeds_into = "ffn")
 
     # config
     self$num_heads <- num_heads
@@ -240,7 +240,7 @@ llama_model <- function(params) {
     keras::layer_embedding(
       input_dim = params$vocab_size,
       output_dim = params$dim,
-      name = "token_embeddings"
+      name = "tok_embeddings"
     )
 
   transformer_blocks <- token_embeddings
@@ -256,8 +256,8 @@ llama_model <- function(params) {
   }
 
   output <- transformer_blocks |>
-    layer_llama_rmsnorm(block_id = -1, eps = params$norm_eps, name = "rmsnorm") |>
-    keras::layer_dense(units = params$vocab_size, use_bias = FALSE, name = "linear_head")
+    layer_llama_rmsnorm(block_id = -1, feeds_into = "", eps = params$norm_eps, name = "norm") |>
+    keras::layer_dense(units = params$vocab_size, use_bias = FALSE, name = "output")
 
   keras::keras_model(inputs, output, name = "llama_model")
 }
