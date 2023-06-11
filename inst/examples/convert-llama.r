@@ -5,6 +5,7 @@ library(glue)
 # https://github.com/huggingface/transformers/blob/main/src/transformers/models/llama/convert_llama_weights_to_hf.py
 Sys.setenv("XLA_FLAGS" = "--xla_gpu_cuda_data_dir=/usr/lib/cuda")
 reticulate::use_condaenv("r-reticulate")
+
 torch <- reticulate::import("torch", convert = FALSE)
 np <- reticulate::import("numpy", convert = FALSE)
 
@@ -33,10 +34,27 @@ weight_map <- tibble::tibble(hf_file = unname(unlist(j$weight_map)), hf_name = n
       hf_name == "model.norm.weight" ~ "norm.weight",
       hf_name == "lm_head.weight" ~ "output.weight",
       TRUE ~ NA_character_
+    ),
+    keras_name = case_when(
+      str_detect(hf_name, "self_attn.q_proj") ~ glue("transformer_{block_id}/attention/wq/kernel:0"),
+      str_detect(hf_name, "self_attn.k_proj") ~ glue("transformer_{block_id}/attention/wk/kernel:0"),
+      str_detect(hf_name, "self_attn.v_proj") ~ glue("transformer_{block_id}/attention/wv/kernel:0"),
+      str_detect(hf_name, "self_attn.o_proj") ~ glue("transformer_{block_id}/attention/wo/kernel:0"),
+      str_detect(hf_name, "mlp.gate_proj") ~ glue("transformer_{block_id}/feed_forward/w1/kernel:0"),
+      str_detect(hf_name, "mlp.down_proj") ~ glue("transformer_{block_id}/feed_forward/w2/kernel:0"),
+      str_detect(hf_name, "mlp.up_proj") ~ glue("transformer_{block_id}/feed_forward/w3/kernel:0"),
+      str_detect(hf_name, "input_layernorm") ~ glue("transformer_{block_id}/attention_norm/Variable:0"),
+      str_detect(hf_name, "post_attention_layernorm") ~ glue("transformer_{block_id}/ffn_norm/Variable:0"),
+      hf_name == "model.embed_tokens.weight" ~ "tok_embeddings/embeddings:0",
+      hf_name == "model.norm.weight" ~ "norm/Variable:0",
+      hf_name == "lm_head.weight" ~ "output/kernel:0",
+      TRUE ~ NA_character_
     )
 ) |>
   filter(!is.na(llama_name)) |>
   select(-block_id)
+
+readr::write_csv(weight_map[-1], "inst/examples/llama-7b-layers.csv")
 
 weight_split <- split(weight_map, weight_map$hf_file)
 

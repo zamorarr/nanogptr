@@ -38,9 +38,21 @@ params <- list(
   n_heads = 2L,
   n_layers = 7L,
   norm_eps = 1E-6,
-  vocab_size = tokenizer$vocab_size()
+  vocab_size = as.vector(tokenizer$vocab_size())
 )
 
+# llama 7B params
+params <- list(
+  dim = 4096L,
+  multiple_of = 256L,
+  n_heads = 32L,
+  n_layers = 32L,
+  norm_eps = 1E-6,
+  vocab_size = as.vector(tokenizer$vocab_size())
+)
+
+# check model fits in memory
+with(params, llama_size(vocab_size, n_layers, n_heads, dim, multiple_of))
 
 # create model
 model <- llama_model(params)
