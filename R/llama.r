@@ -251,3 +251,35 @@ llama_model <- function(params) {
 
   keras::keras_model(inputs, output, name = "llama_model")
 }
+
+llama_load_weights <- function(model, path = "~/data/llama-np/7B") {
+  # all layer names
+  #lapply(model$layers, \(layer) vapply(layer$weights, \(x) x$name, character(1)))
+  #lapply(model$weights, \(w) w$name)
+
+  # name map
+  #df <- readr::read_csv("inst/examples/llama-7b-layers.csv")
+  #layermap <- setNames(df$llama_name, df$keras_name)
+  #layermap
+
+  for (layer in model$layers) {
+    for (weight in layer$weights) {
+      cat("loading", weight$name, "with shape", paste(tf$shape(weight)$numpy(), collapse="x"), " ")
+      value <- llama_load_weight(path, weight$name)
+      cat("from values with shape", paste(value$shape, collapse="x"), "\n")
+      weight$assign(value)
+    }
+  }
+
+  invisible(model)
+}
+
+llama_load_weight <- function(path, keras_name = "transformer_0/attention/wq/kernel:0") {
+  #np <- reticulate::import("numpy", convert = FALSE)
+  stopifnot(keras_name %in% names(layermap))
+
+  llama_name <- layermap[[keras_name]]
+  path <- file.path(path, sprintf("%s.npy", llama_name))
+  path <- normalizePath(path, mustWork = TRUE)
+  np$load(path)
+}
