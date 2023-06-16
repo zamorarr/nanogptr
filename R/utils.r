@@ -83,7 +83,7 @@ llama_params <- function(vocab_size, n_layer, n_head, n_embed, multiple_of = 256
 #' llama_size(32000, 60, 52, 6656, 256) # llama-32.5B
 #' llama_size(32000, 80, 64, 8192, 256) # llama-65.2B
 #' @export
-llama_size <- function(vocab_size, n_layer, n_head, n_embed, multiple_of = 256L) {
+llama_size <- function(vocab_size, n_layer, n_head, n_embed, multiple_of = 256L, pretty = TRUE) {
   out <- list()
 
   # embeddings
@@ -116,7 +116,8 @@ llama_size <- function(vocab_size, n_layer, n_head, n_embed, multiple_of = 256L)
   out$total <- out$embedding + out$transformers + out$final
 
   df <- data.frame(name = names(out), params = unname(unlist(out)))
-  prettify_size(df)
+  if (pretty) df <- prettify_size(df)
+  df
 }
 
 #llama_params(tokenizer$vocab_size()$numpy(), params$n_layers, params$n_heads, params$dim, params$multiple_of)
