@@ -29,7 +29,8 @@ layer_llama_rmsnorm <- keras::new_layer_class(
     self$w <- self$add_weight(
       shape = w_shape,
       initializer = "ones",
-      trainable = TRUE)
+      trainable = TRUE,
+      name = "kernel")
   },
 
   rrms = function(x) {

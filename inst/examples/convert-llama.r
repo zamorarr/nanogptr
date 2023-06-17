@@ -43,10 +43,10 @@ weight_map <- tibble::tibble(hf_file = unname(unlist(j$weight_map)), hf_name = n
       str_detect(hf_name, "mlp.gate_proj") ~ glue("transformer_{block_id}/feed_forward/w1/kernel:0"),
       str_detect(hf_name, "mlp.down_proj") ~ glue("transformer_{block_id}/feed_forward/w2/kernel:0"),
       str_detect(hf_name, "mlp.up_proj") ~ glue("transformer_{block_id}/feed_forward/w3/kernel:0"),
-      str_detect(hf_name, "input_layernorm") ~ glue("transformer_{block_id}/attention_norm/Variable:0"),
-      str_detect(hf_name, "post_attention_layernorm") ~ glue("transformer_{block_id}/ffn_norm/Variable:0"),
+      str_detect(hf_name, "input_layernorm") ~ glue("transformer_{block_id}/attention_norm/kernel:0"),
+      str_detect(hf_name, "post_attention_layernorm") ~ glue("transformer_{block_id}/ffn_norm/kernel:0"),
       hf_name == "model.embed_tokens.weight" ~ "tok_embeddings/embeddings:0",
-      hf_name == "model.norm.weight" ~ "norm/Variable:0",
+      hf_name == "model.norm.weight" ~ "norm/kernel:0",
       hf_name == "lm_head.weight" ~ "output/kernel:0",
       TRUE ~ NA_character_
     )
