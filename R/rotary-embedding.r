@@ -1,4 +1,4 @@
-rope_angles <- function(seqlen, feature_dim, theta = 10000) {
+rope_angles <- function(feature_dim, theta = 10000) {
   delta <- 1/(feature_dim %/% 2)
   freqs <- tf$range(start = 0, limit = 1, delta = delta, dtype = tf$float32)
   1.0/(theta^freqs) # {feature_dim/2}
@@ -13,7 +13,7 @@ rope_matrix <- function(seqlen, feature_dim, theta = 10000) {
   pos <- tf$range(seqlen, dtype = tf$float32) # {seqlen}
 
   # vector of angles
-  angles <- rope_angles(seqlen, feature_dim, theta = theta) # {feature_dim/2}
+  angles <- rope_angles(feature_dim, theta = theta) # {feature_dim/2}
 
   # outer product
   # out[i,j] <- pos[i]*angles[j]

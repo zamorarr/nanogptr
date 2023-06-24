@@ -1,11 +1,10 @@
 test_that("rope_angles are correct", {
-  seqlen <- 7L
   feature_dim <- 16L
   theta <- 10000
   feature_dim_half <- feature_dim %/% 2
 
   # compute angles
-  actual <- rope_angles(seqlen, feature_dim, theta = theta)
+  actual <- rope_angles(feature_dim, theta = theta)
 
   # from Roformers paper
   expected <- theta^(-(seq(feature_dim_half) - 1)/feature_dim_half)
