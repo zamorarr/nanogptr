@@ -253,20 +253,48 @@ llama_model <- function(params) {
   keras::keras_model(inputs, output, name = "llama_model")
 }
 
-llama_load_weights <- function(model, path = "~/data/llama-np/7B") {
+llama_load_weights <- function(model, params, path = "~/data/llama-np/7B", from_hf = FALSE) {
+  np <- reticulate::import("numpy", convert = FALSE)
   # all layer names
   #lapply(model$layers, \(layer) vapply(layer$weights, \(x) x$name, character(1)))
   #lapply(model$weights, \(w) w$name)
 
   # name map
-  #df <- readr::read_csv("inst/examples/llama-7b-layers.csv")
-  #layermap <- setNames(df$llama_name, df$keras_name)
+  layermap <- readr::read_csv("inst/examples/llama-7b-layers.csv")
+  layermap <- setNames(layermap$llama_name, layermap$keras_name)
   #layermap
 
   for (layer in model$layers) {
     for (weight in layer$weights) {
       cat("loading", weight$name, "with shape", paste(tf$shape(weight)$numpy(), collapse="x"), " ")
-      value <- llama_load_weight(path, weight$name)
+
+      stopifnot(weight$name %in% names(layermap))
+      llama_name <- layermap[[weight$name]]
+      value <- llama_load_weight(path, llama_name)
+
+      if (grepl("attention/w[qk]/kernel:0", weight$name)) {
+        if (from_hf) {
+          message("unpermuting hf")
+          # have to unpermute first
+          n_heads <- params$n_heads
+          mdim <- params$dim
+          head_size <- mdim %/% n_heads
+          value <- value |>
+            np$reshape(as.integer(c(n_heads, 2, head_size %/% 2, mdim))) |>
+            np$transpose(c(0L, 2L, 1L, 3L)) |>
+            np$reshape(c(mdim, mdim))
+        }
+        value <- np$transpose(value)
+      } else if (grepl("attention/w[vo]/kernel:0", weight$name)) {
+        value <- np$transpose(value)
+      } else if (grepl("forward/w[1-3]/kernel:0", weight$name)) {
+        value <- np$transpose(value)
+      } else if (grepl("norm/kernel:0", weight$name)) {
+        value <- np$expand_dims(value, c(0L, 1L))
+      } else if (grepl("output/kernel:0", weight$name)) {
+        value <- np$transpose(value)
+      }
+
       cat("from values with shape", paste(value$shape, collapse="x"), "\n")
       weight$assign(value)
     }
@@ -275,12 +303,11 @@ llama_load_weights <- function(model, path = "~/data/llama-np/7B") {
   invisible(model)
 }
 
-llama_load_weight <- function(path, keras_name = "transformer_0/attention/wq/kernel:0") {
-  #np <- reticulate::import("numpy", convert = FALSE)
-  stopifnot(keras_name %in% names(layermap))
+llama_load_weight <- function(path, name) {
+  np <- reticulate::import("numpy", convert = FALSE)
 
-  llama_name <- layermap[[keras_name]]
-  path <- file.path(path, sprintf("%s.npy", llama_name))
+  #llama_name <- layermap[[keras_name]]
+  path <- file.path(path, sprintf("%s.npy", name))
   path <- normalizePath(path, mustWork = TRUE)
   np$load(path)
 }
