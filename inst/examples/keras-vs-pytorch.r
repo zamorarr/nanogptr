@@ -80,3 +80,68 @@ tf_output <- tf$constant(x) |> model()
 reticulate::py_to_r(np$array_equal(pt_output$cpu()$numpy(), tf_output$numpy()))
 #reticulate::py_to_r(np$array_equal(pt_output[0]$cpu()$numpy(), tf_output[1]$numpy()))
 mean(reticulate::py_to_r(np$isclose(tf_output$numpy(), pt_output$cpu()$numpy(), atol=1E-5)))
+
+# test mlp
+input <- array(seq(3*4096)/(3*4096), dim = c(1, 3, 4096))
+with(torch$no_grad(), {
+  torch$tensor(input, dtype = torch$float16)$to("cuda") |>
+    model3$model$layers[0]$mlp()
+})
+
+tf$constant(input, dtype = tf$dtypes$float16) |>
+  model$layers[[3]]$ffwd()
+
+# test self-attention
+with(torch$no_grad(), {
+  torch$tensor(input, dtype = torch$float16)$to("cuda") |>
+    model3$model$layers[0]$self_attn()
+})
+
+rots <- rope_matrix(3, params$dim %/% params$n_heads)
+tf$constant(input, dtype = tf$dtypes$float16) |>
+  model$layers[[3]]$sa(rots)
+
+# test w1
+with(torch$no_grad(), {
+  torch$tensor(input, dtype = torch$float16)$to("cuda") |>
+    model3$model$layers[0]$mlp$gate_proj() |>
+    model3$model$layers[0]$mlp$act_fn()
+})
+
+tf$constant(input, dtype = tf$dtypes$float16) |>
+  model$layers[[3]]$ffwd$w1() |>
+  tf$nn$silu()
+
+# test w3
+with(torch$no_grad(), {
+  torch$tensor(input, dtype = torch$float16)$to("cuda") |>
+    model3$model$layers[0]$mlp$up_proj()
+})
+
+tf$constant(input, dtype = tf$dtypes$float16) |>
+  model$layers[[3]]$ffwd$w3()
+
+# test w1*w3
+with(torch$no_grad(), {
+  r1 <- torch$tensor(input, dtype = torch$float16)$to("cuda") |>
+    model3$model$layers[0]$mlp$gate_proj() |>
+    model3$model$layers[0]$mlp$act_fn()
+  r3 <- torch$tensor(input, dtype = torch$float16)$to("cuda") |>
+    model3$model$layers[0]$mlp$up_proj()
+
+  model3$model$layers[0]$mlp$down_proj(torch$mul(r1, r3))
+})
+
+s1 <- tf$constant(input, dtype = tf$dtypes$float16) |>
+  model$layers[[3]]$ffwd$w1() |>
+  tf$nn$silu()
+
+s3 <- tf$constant(input, dtype = tf$dtypes$float16) |>
+  model$layers[[3]]$ffwd$w3()
+
+model$layers[[3]]$ffwd$w2(s1 * s3)
+
+mean(reticulate::py_to_r(r1$detach()$cpu()$numpy()) == s1$numpy())
+reticulate::py_to_r(torch$mul(r1, r3)[0][0]$detach()$cpu()$numpy()) == tf$multiply(s1, s3)[1,1,]$numpy()
+     #model3$model$layers[0]$mlp$gate_proj$weight#$detach()$cpu()$numpy()
+#model$layers[[3]]$ffwd$w1$weights[[1]]#$numpy()
