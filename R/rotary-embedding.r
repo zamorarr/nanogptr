@@ -9,11 +9,11 @@ rope_angles <- function(feature_dim, theta = 10000) {
 #' @param feature_dim size of features
 #' @export
 rope_matrix <- function(seqlen, feature_dim, theta = 10000) {
-  # vector representing position of tokens
-  pos <- tf$range(seqlen, dtype = tf$float32) # {seqlen}
-
   # vector of angles
   angles <- rope_angles(feature_dim, theta = theta) # {feature_dim/2}
+
+  # vector representing position of tokens
+  pos <- tf$range(seqlen, dtype = angles$dtype) # {seqlen}
 
   # outer product
   # out[i,j] <- pos[i]*angles[j]
@@ -23,10 +23,11 @@ rope_matrix <- function(seqlen, feature_dim, theta = 10000) {
   # broadcast
   mat <- mat[tf$newaxis, , tf$newaxis, ] # {1, seqlen, 1, feature_dim/2}
 
+  # convert to floatx
   # split into list
   list(
-    cos = Re(mat) |> tf$`repeat`(2L, axis = -1L), # {1, seqlen, 1, feature_dim}
-    sin = Im(mat) |> tf$`repeat`(2L, axis = -1L) # {1, seqlen, 1, feature_dim}
+    cos = Re(mat) |> tf$`repeat`(2L, axis = -1L) |> keras::k_cast_to_floatx(), # {1, seqlen, 1, feature_dim}
+    sin = Im(mat) |> tf$`repeat`(2L, axis = -1L) |> keras::k_cast_to_floatx() # {1, seqlen, 1, feature_dim}
   )
 }
 

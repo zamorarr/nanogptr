@@ -28,6 +28,7 @@ layer_llama_rmsnorm <- keras::new_layer_class(
     w_shape = tf$pad(model_dim, paddings, constant_values = 1L)
     self$w <- self$add_weight(
       shape = w_shape,
+      dtype = tf$dtypes$float32,
       initializer = "ones",
       trainable = TRUE,
       name = "kernel")
@@ -45,7 +46,13 @@ layer_llama_rmsnorm <- keras::new_layer_class(
   },
 
   call = function(x) {
-    x * self$rrms(x) * self$w
+    input_dtype <- x$dtype
+    # cast x to float32 first to maintain precision
+    x32 <- tf$cast(x, dtype = tf$dtypes$float32)
+    result <- x32 * self$rrms(x32) * self$w
+
+    # cast result back to input dtype
+    tf$cast(result, dtype = input_dtype)
   },
 
   get_config = function() {
@@ -92,7 +99,7 @@ layer_llama_feedforward <- keras::new_layer_class(
   }
 )
 
-llama_make_mask <- function(seqlen, dtype = keras::k_floatx()) {
+llama_make_mask <- function(seqlen, dtype) {
   x <- tf$range(seqlen)
   row_index <- x[, tf$newaxis]
   col_index <- x[tf$newaxis, ]
@@ -120,6 +127,7 @@ layer_llama_multi_self_attention <- keras::new_layer_class(
 
     self$num_heads <- num_heads
     self$head_size <- head_size
+    self$score_norm <- tf$sqrt(tf$convert_to_tensor(head_size, dtype = keras::k_floatx()))
   },
 
   call = function(input, rots = NULL) {
@@ -146,10 +154,16 @@ layer_llama_multi_self_attention <- keras::new_layer_class(
     k <- tf$transpose(k, c(0L, 2L, 3L, 1L)) # {batch_size, num_heads, head_size, seqlen}
 
     # calculate attention scores
-    scores <- tf$matmul(q, k)/tf$sqrt(1.0*self$head_size) # {batch_size, num_heads, seqlen, seqlen}
+    scores <- tf$matmul(q, k)/self$score_norm # {batch_size, num_heads, seqlen, seqlen}
     mask <- llama_make_mask(seqlen, dtype = scores$dtype) # {1, 1, seqlen, seqlen}
     scores <- scores + mask
-    scores <- keras::k_softmax(scores) # {batch_size, num_heads, seqlen, seqlen}
+
+    # softmax should be fp32
+    scores <- scores |>
+      tf$cast(tf$dtypes$float32) |>
+      tf$nn$softmax() |>
+      tf$cast(q$dtype) # {batch_size, num_heads, seqlen, seqlen}
+      #keras::k_softmax(scores)
 
     # calculate value
     output <- tf$matmul(scores, v) # {batch_size, num_heads, seqlen, head_size}

@@ -66,5 +66,4 @@ test_that("rope works", {
   dot <- k_sum(x*x, axis = -1)
   rdot <- k_sum(rx*rx, axis = -1)
   expect_equal(as.vector(dot), as.vector(rdot), tolerance = 1E-7)
-
 })
