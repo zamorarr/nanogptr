@@ -8,7 +8,7 @@ rope_angles <- function(feature_dim, theta = 10000) {
 #' @param seqlen size of sequence
 #' @param feature_dim size of features
 #' @export
-rope_matrix <- function(seqlen, feature_dim, theta = 10000) {
+rope_matrix <- function(seqlen, feature_dim, theta = 10000, dtype = keras::k_floatx()) {
   # vector of angles
   angles <- rope_angles(feature_dim, theta = theta) # {feature_dim/2}
 
@@ -18,16 +18,14 @@ rope_matrix <- function(seqlen, feature_dim, theta = 10000) {
   # outer product
   # out[i,j] <- pos[i]*angles[j]
   out <- tf$einsum('a,b->ab', pos, angles) # {seqlen, feature_dim/2}
-  mat <- tf$complex(tf$cos(out), tf$sin(out)) # {seqlen, feature_dim/2}
 
   # broadcast
-  mat <- mat[tf$newaxis, , tf$newaxis, ] # {1, seqlen, 1, feature_dim/2}
+  out <- out[tf$newaxis, , tf$newaxis, ] # {1, seqlen, 1, feature_dim/2}
 
-  # convert to floatx
-  # split into list
+  # split into list and cast
   list(
-    cos = Re(mat) |> tf$`repeat`(2L, axis = -1L) |> keras::k_cast_to_floatx(), # {1, seqlen, 1, feature_dim}
-    sin = Im(mat) |> tf$`repeat`(2L, axis = -1L) |> keras::k_cast_to_floatx() # {1, seqlen, 1, feature_dim}
+    cos = out |> tf$cos() |> repeat_twice() |> tf$cast(dtype), # {1, seqlen, 1, feature_dim}
+    sin = out |> tf$sin() |> repeat_twice() |> tf$cast(dtype)  # {1, seqlen, 1, feature_dim}
   )
 }
 
@@ -36,6 +34,10 @@ rotate_every_two <- function(x) {
   x2 <- x[all_dims(), `2::2`]
   y <- tf$stack(list(-x2, x1), axis = -1L)
   tf$reshape(y, tf$shape(x))
+}
+
+repeat_twice <- function(x) {
+  tf$`repeat`(x, 2L, axis = -1L)
 }
 
 #' ROtational Position Embeddings
