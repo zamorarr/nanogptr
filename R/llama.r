@@ -2,6 +2,7 @@
 #' @param path to tokenizer.model file
 #' @export
 llama_tokenizer <- function(path) {
+  # could not install tf_text on macos
   tf_text <- reticulate::import("tensorflow_text")
   path <- normalizePath(path, mustWork = TRUE)
 
@@ -101,15 +102,16 @@ layer_llama_feedforward <- keras::new_layer_class(
 
 llama_make_mask <- function(seqlen, dtype) {
   x <- tf$range(seqlen)
+  y <- tf$range(seqlen)
   row_index <- x[, tf$newaxis]
-  col_index <- x[tf$newaxis, ]
+  col_index <- y[tf$newaxis, ]
   mask <- tf$where(
     row_index < col_index,
     tf$constant(-Inf, dtype = dtype),
     tf$constant(0, dtype = dtype)
   )
 
-  # {1, 1, seqlen, seqlen}
+  # {1, 1, seqlen_q, seqlen_kv}
   mask[tf$newaxis, tf$newaxis, , ]
 }
 
@@ -130,51 +132,72 @@ layer_llama_multi_self_attention <- keras::new_layer_class(
     self$score_norm <- tf$sqrt(tf$convert_to_tensor(head_size, dtype = keras::k_floatx()))
   },
 
-  call = function(input, rots = NULL) {
-    # input = {batch_size, seq_len, n_features = head_size*num_heads}
-    c(batch_size, seqlen, n_features) %<-% tf$unstack(tf$shape(input))
+  # rots = rotation_matrix
+  # mask = casual mask = {1, 1, seqlen_q, seqlen_kv}
+  # cache = list of (k/v cached tensors)
+  # cache_position = current position in seqlen we are predicting (using cache)
+  call = function(input, attn_rots, attn_mask, cache = NULL, seqpos = 0L) {
+    # input = {batch_size, seqlen, n_features = head_size*num_heads}
+    c(batch_size, seqlen_q, n_features) %<-% tf$unstack(tf$shape(input))
 
     # project x into query, key, value
-    # self$wq(x) = {batch_size, seqlen, num_heads*head_size}
-    split_heads_shape <- c(batch_size, seqlen, self$num_heads, self$head_size)
+    # self$wq(x) = {batch_size, seqlen_q, num_heads*head_size}
+    split_heads_shape <- c(batch_size, seqlen_q, self$num_heads, self$head_size)
     q <- input |> self$wq() |> tf$reshape(split_heads_shape)
     k <- input |> self$wk() |> tf$reshape(split_heads_shape)
     v <- input |> self$wv() |> tf$reshape(split_heads_shape)
 
     # embed positional information in query and key
-    if (is.null(rots)) rots <- rope_matrix(seqlen, self$head_size)
-    q <- rope(q, rots)
-    k <- rope(k, rots)
+    q <- rope(q, attn_rots)
+    k <- rope(k, attn_rots)
+
+    # use cache for k/v vectors
+    # see: https://keras.io/api/keras_nlp/modeling_layers/cached_multi_head_attention/
+    # https://github.com/keras-team/keras-nlp/blob/v0.5.1/keras_nlp/layers/cached_multi_head_attention.py#L23
+    if (!is.null(cache)) {
+      message("using kv cache!")
+      # append k/v to full caches
+      update_slice <- tf$compiler$tf2xla$python$xla$dynamic_update_slice
+      cache$k <- update_slice(cache$k, k, c(0L, seqpos, 0L, 0L))
+      cache$v <- update_slice(cache$v, v, c(0L, seqpos, 0L, 0L))
+
+      # get k/v up to current position
+      seqlen_kv <- seqlen_q + seqpos
+      k <- cache$k[,NA:seqlen_kv,,]
+      v <- cache$v[,NA:seqlen_kv,,]
+    } else {
+      # create cache?
+      cache <- list(k = k, v = v)
+    }
 
     # reshape
     # move heads out of last two axes so that matmuls
     # are performed across heads (seqlen, head_size) axes
-    v <- tf$transpose(v, c(0L, 2L, 1L, 3L)) # {batch_size, num_heads, seqlen, head_size}
-    q <- tf$transpose(q, c(0L, 2L, 1L, 3L)) # {batch_size, num_heads, seqlen, head_size}
-    k <- tf$transpose(k, c(0L, 2L, 3L, 1L)) # {batch_size, num_heads, head_size, seqlen}
+    q <- tf$transpose(q, c(0L, 2L, 1L, 3L)) # {batch_size, num_heads, seqlen_q, head_size}
+    k <- tf$transpose(k, c(0L, 2L, 3L, 1L)) # {batch_size, num_heads, head_size, seqlen_kv}
+    v <- tf$transpose(v, c(0L, 2L, 1L, 3L)) # {batch_size, num_heads, seqlen_kv, head_size}
 
     # calculate attention scores
-    scores <- tf$matmul(q, k)/self$score_norm # {batch_size, num_heads, seqlen, seqlen}
-    mask <- llama_make_mask(seqlen, dtype = scores$dtype) # {1, 1, seqlen, seqlen}
-    scores <- scores + mask
+    scores <- tf$matmul(q, k)/self$score_norm # {batch_size, num_heads, seqlen_q, seqlen_kv}
+    if (!is.null(attn_mask)) scores <- scores + attn_mask
 
     # softmax should be fp32
     scores <- scores |>
       tf$cast(tf$dtypes$float32) |>
       tf$nn$softmax() |>
-      tf$cast(q$dtype) # {batch_size, num_heads, seqlen, seqlen}
-      #keras::k_softmax(scores)
+      tf$cast(q$dtype) # {batch_size, num_heads, seqlen_q, seqlen_kv}
 
     # calculate value
-    output <- tf$matmul(scores, v) # {batch_size, num_heads, seqlen, head_size}
+    output <- tf$matmul(scores, v) # {batch_size, num_heads, seqlen_q, head_size}
 
     # combine heads back into single features dimension
     output <- output |>
-      tf$transpose(c(0L, 2L, 1L, 3L)) |>  # {batch_size, seqlen, num_heads, head_size}
-      tf$reshape(tf$shape(input)) # {batch_size, seqlen, num_heads*head_size}
+      tf$transpose(c(0L, 2L, 1L, 3L)) |>  # {batch_size, seqlen_q, num_heads, head_size}
+      tf$reshape(tf$shape(input)) # {batch_size, seqlen_q, num_heads*head_size}
 
     # final linear projection
-    self$wo(output)
+    output <- self$wo(output) # {batch_size, seqlen_q, model_dim = num_heads*head_size}
+    list(output, cache)
   },
 
   get_config = function() {
@@ -214,11 +237,29 @@ layer_llama_transformer_block <- keras::new_layer_class(
     self$norm_eps <- norm_eps
   },
 
-  call = function(input, rots = NULL) {
-    # residual connection
-    x <- input + self$sa(self$sa_norm(input), rots)
-    x <- x + self$ffwd(self$ffwd_norm(x))
-    x
+  call = function(input, attn_rots, attn_mask, ...) {
+    # trim mask
+    c(batch_size, seqlen, n_features) %<-% tf$unstack(tf$shape(input))
+    attn_mask <- attn_mask[1,1,seqlen,seqlen, drop = FALSE]
+
+    # self-attention + residual
+    residual <- input
+    values <- input |>
+      self$sa_norm() |>
+      self$sa(attn_rots = attn_rots, attn_mask = attn_mask, ...)
+    x <- values[[1]]
+    cache <- values[[2]]
+    x <- x + residual
+
+    # ffwd + residual
+    residual <- x
+    x <- x |>
+      self$ffwd_norm() |>
+      self$ffwd()
+    x <- x + residual
+
+    # return output and cache
+    list(x, cache)
   },
 
   get_config = function() {
@@ -234,11 +275,11 @@ layer_llama_transformer_block <- keras::new_layer_class(
 #' Create LLaMA model
 #' @param params list of params
 #' @export
-llama_model <- function(params) {
+llama_model <- function(params, max_context_size = 2048L) {
   # compute rotational embedding frequencies
-  max_context_size <- 2048L
   head_size <- params$dim %/% params$n_heads
-  rots <- rope_matrix(max_context_size,  head_size)
+  attn_rots <- rope_matrix(max_context_size, head_size)
+  attn_mask <- llama_make_mask(max_context_size, dtype = tf$dtypes$float32)
 
   inputs <- keras::layer_input(shape = keras::shape(NA), name = "input")
 
@@ -257,7 +298,7 @@ llama_model <- function(params) {
       multiple_of = params$multiple_of,
       norm_eps = params$norm_eps,
       name = paste0("transformer_", i))
-    transformer_blocks <- block(transformer_blocks, rots = rots)
+    c(transformer_blocks, cache) %<-% block(transformer_blocks, attn_rots = attn_rots, attn_mask = attn_mask)
   }
 
   output <- transformer_blocks |>
@@ -266,6 +307,112 @@ llama_model <- function(params) {
 
   keras::keras_model(inputs, output, name = "llama_model")
 }
+
+llama_model2 <- keras::new_model_class(
+  "LlamaModel",
+  initialize = function(params, ...) {
+    super$initialize(...)
+
+    max_seqlen <- 2048L
+    head_size <-  params$dim %/% params$n_heads
+
+    # pre-compute max-size rotation matrix
+    self$rots <- rope_matrix(max_seqlen, head_size)
+
+    # pre-compute max-size mask
+    self$mask <- llama_make_mask(max_seqlen, keras::k_floatx())
+
+    # embedding layers
+    self$tok_embeddings <- keras::layer_embedding(
+      input_dim = params$vocab_size,
+      output_dim = params$dim,
+      name = "tok_embeddings")
+
+    # transformer blocks
+    self$transformer_blocks <- lapply(seq(params$n_layers) - 1L, function(i) {
+      layer_llama_transformer_block(
+        num_heads = params$n_heads,
+        head_size = head_size,
+        multiple_of = params$multiple_of,
+        norm_eps = params$norm_eps,
+        name = paste0("transformer_", i))
+    })
+
+    # final layers
+    self$norm <- layer_llama_rmsnorm(eps = params$norm_eps, name = "norm")
+    self$lm_head <- layer_dense(units = params$vocab_size, use_bias = FALSE, name = "output")
+  },
+
+  call = function(input) {
+    # get input shape
+    c(batch_size, seqlen) %<-% tf$unstack(tf$shape(input))
+
+    # seqlen-size mask and rotation matrix
+    mask <- self$mask[, , NA:seqlen, NA:seqlen]
+    rots <- lapply(self$rots, \(r) r[, NA:seqlen, ,])
+
+    # custom forward pass
+    x <- input |> self$tok_embeddings()
+    for (block in self$transformer_blocks) {
+      c(x, cache) %<-% block(x, rots = rots, mask = mask)
+    }
+    output <- x |>
+      self$norm() |> # rmsnorm
+      _[, -1L, ] |> # only select logit of last token
+      self$lm_head() # dense projection
+
+    # return output
+    output
+  },
+
+  # position is zero-indexed?
+  call_with_cache = function(input, caches = NULL, position = 0L) {
+    # get input shape
+    c(batch_size, seqlen) %<-% tf$unstack(tf$shape(input))
+    stopifnot(is.null(caches) || seqlen == 1L)
+
+    # create default cache if none provided
+    if (is.null(caches)) caches <- vector("list", length(self$transformer_blocks))
+
+    # custom forward pass (using k/q cache)
+    x <- input |> self$tok_embeddings()
+
+    # trim rotation matrices? (no need, they are trimmed in rope())
+    # make mask
+    # if using caches, should only be running inference on one token
+    # at a time
+    stopifnot(length(caches) == length(self$transformer_blocks))
+    #stopifnot(names(caches[[1]]) == c("k", "v"))
+
+    # inference with one token
+    # no mask, smaller rotation matrix
+    mask <- NULL
+    #position <- keras::as_tensor(position, dtype = "int32")
+    rots <- lapply(self$rots, \(r) r[, position, , , drop = FALSE, style = "python"])
+
+    for (i in seq_along(self$transformer_blocks)) {
+      block <- self$transformer_blocks[[i]]
+
+      # get cache
+      cache <- caches[[i]]
+
+      # transformer block
+      c(x, cache) %<-% block(x, attn_rots = rots, attn_mask = mask, cache = cache, seqpos = position)
+
+      # update cache
+      # when cache is NULL this is removing an entry from caches.
+      # FIX
+      caches[[i]] <- cache
+    }
+
+    output <- x |>
+      self$norm() |> # rmsnorm
+      self$lm_head() # dense projection
+
+    # return output and updated k/q cache
+    list(output = output, caches = caches)
+  }
+)
 
 llama_load_weights <- function(model, params, path = "~/data/llama-np/7B", from_hf = FALSE) {
   np <- reticulate::import("numpy", convert = FALSE)
@@ -323,5 +470,6 @@ llama_load_weight <- function(path, name) {
   #llama_name <- layermap[[keras_name]]
   path <- file.path(path, sprintf("%s.npy", name))
   path <- normalizePath(path, mustWork = TRUE)
+
   np$load(path)
 }
