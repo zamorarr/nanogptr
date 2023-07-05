@@ -96,7 +96,7 @@ llama_size <- function(vocab_size, n_layer, n_head, n_embed, multiple_of = 256L,
   out[["attention"]] <- out[["attention/rmsnorm"]] + out[["attention/kqvo"]]
 
   # MLP blocks
-  ffw_size <- round(2/3*4*n_embed/multiple_of)*multiple_of
+  ffw_size <- ceiling(2/3*4*n_embed/multiple_of)*multiple_of
   out[["mlp/rmsnorm"]] <- n_embed
   out[["mlp/w1"]] <- n_embed * ffw_size
   out[["mlp/w2"]] <- ffw_size * n_embed
