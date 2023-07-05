@@ -4,7 +4,7 @@
 \alias{rope_matrix}
 \title{Rotation Matrix for RoPE}
 \usage{
-rope_matrix(seqlen, feature_dim, theta = 10000)
+rope_matrix(seqlen, feature_dim, theta = 10000, dtype = keras::k_floatx())
 }
 \arguments{
 \item{seqlen}{size of sequence}

@@ -4,7 +4,7 @@
 \alias{llama_model}
 \title{Create LLaMA model}
 \usage{
-llama_model(params)
+llama_model(params, max_context_size = 2048L, use_cache = FALSE)
 }
 \arguments{
 \item{params}{list of params}

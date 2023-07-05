@@ -4,7 +4,14 @@
 \alias{llama_size}
 \title{Estimate LLaMA Total Parameters}
 \usage{
-llama_size(vocab_size, n_layer, n_head, n_embed, multiple_of = 256L)
+llama_size(
+  vocab_size,
+  n_layer,
+  n_head,
+  n_embed,
+  multiple_of = 256L,
+  pretty = TRUE
+)
 }
 \arguments{
 \item{vocab_size}{number of vocabulary tokens}

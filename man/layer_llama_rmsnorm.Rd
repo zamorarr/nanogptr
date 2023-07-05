@@ -4,13 +4,7 @@
 \alias{layer_llama_rmsnorm}
 \title{LLaMA RMS Norm Layer}
 \usage{
-layer_llama_rmsnorm(
-  object,
-  eps = 1e-06,
-  ...,
-  block_id = NULL,
-  feeds_into = NULL
-)
+layer_llama_rmsnorm(object, eps = 1e-06, ...)
 }
 \description{
 LLaMA RMS Norm Layer

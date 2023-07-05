@@ -35,14 +35,14 @@ layer_llama_rmsnorm <- keras::new_layer_class(
       name = "kernel")
   },
 
-  rrms = function(x) {
+  rrms = function(x, eps) {
     # reciprocal root mean square along last axis
     # same as dividing by std dev? assuming zero mean
     # x = {batch_size, seqlen, model_dim}
     x |>
       tf$math$square() |> # {B, T, D}
       tf$reduce_mean(axis = -1L, keepdims = TRUE) |> # {B, T, 1}
-      tf$math$add(self$eps) |> # {B, T, 1}
+      tf$math$add(eps) |> # {B, T, 1}
       tf$math$rsqrt() # {B, T, 1}
   },
 
@@ -50,7 +50,7 @@ layer_llama_rmsnorm <- keras::new_layer_class(
     input_dtype <- x$dtype
     # cast x to float32 first to maintain precision
     x32 <- tf$cast(x, dtype = tf$dtypes$float32)
-    result <- x32 * self$rrms(x32) * self$w
+    result <- x32 * self$rrms(x32, eps = self$eps) * self$w
 
     # cast result back to input dtype
     tf$cast(result, dtype = input_dtype)
@@ -66,15 +66,23 @@ layer_llama_rmsnorm <- keras::new_layer_class(
   }
 )
 
+#' Calculate hidden dim for feedforward network
+#'
+#' Rounds 8/3*output_dim to the next multiple of multiple_of
+llama_hidden_dim <- function(output_dim, multiple_of) {
+  hidden_dim <- as.integer(4 * output_dim * (2/3))
+  hidden_dim <- (hidden_dim + multiple_of - 1) %/% multiple_of
+  hidden_dim <- hidden_dim * multiple_of
+  hidden_dim
+}
+
 layer_llama_feedforward <- keras::new_layer_class(
   "LlamaFeedForward",
   initialize = function(output_dim, multiple_of = 256L, ...) {
     super$initialize(...)
 
     # compute hidden_dim
-    hidden_dim <- as.integer(4 * output_dim * (2/3))
-    hidden_dim <- (hidden_dim + multiple_of - 1) %/% multiple_of
-    hidden_dim <- hidden_dim * multiple_of
+    hidden_dim <- llama_hidden_dim(output_dim, multiple_of)
 
     # dense layers
     self$w1 <- keras::layer_dense(units = hidden_dim, use_bias = FALSE, name = "w1")
@@ -135,8 +143,8 @@ layer_llama_multi_self_attention <- keras::new_layer_class(
   # rots = rotation_matrix
   # mask = casual mask = {1, 1, seqlen_q, seqlen_kv}
   # cache = list of (k/v cached tensors)
-  # cache_position = current position in seqlen we are predicting (using cache)
-  call = function(input, attn_rots, attn_mask, cache = NULL, seqpos = 0L) {
+  # cache_pos = current position in seqlen we are predicting (using cache)
+  call = function(input, attn_rots, attn_mask, training = FALSE, cache = NULL, cache_pos = 0L) {
     # input = {batch_size, seqlen, n_features = head_size*num_heads}
     c(batch_size, seqlen_q, n_features) %<-% tf$unstack(tf$shape(input))
 
@@ -155,19 +163,30 @@ layer_llama_multi_self_attention <- keras::new_layer_class(
     # see: https://keras.io/api/keras_nlp/modeling_layers/cached_multi_head_attention/
     # https://github.com/keras-team/keras-nlp/blob/v0.5.1/keras_nlp/layers/cached_multi_head_attention.py#L23
     if (!is.null(cache)) {
-      message("using kv cache!")
-      # append k/v to full caches
-      update_slice <- tf$compiler$tf2xla$python$xla$dynamic_update_slice
-      cache$k <- update_slice(cache$k, k, c(0L, seqpos, 0L, 0L))
-      cache$v <- update_slice(cache$v, v, c(0L, seqpos, 0L, 0L))
+      # check we are not training
+      if (training) stop("cannot use k/v cache while in training mode", call. = FALSE)
 
-      # get k/v up to current position
-      seqlen_kv <- seqlen_q + seqpos
-      k <- cache$k[,NA:seqlen_kv,,]
-      v <- cache$v[,NA:seqlen_kv,,]
+      message("using kv cache!")
+
+      # unpack cache
+      c(cache_k, cache_v) %<-% keras::k_unstack(cache, axis = 2L)
+
+      # prepend caches to current k,v
+      update_slice <- tf$compiler$tf2xla$python$xla$dynamic_update_slice
+      cache_start <- c(0L, cache_pos, 0L, 0L)
+      k <- update_slice(cache_k, k, cache_start)
+      v <- update_slice(cache_v, v, cache_start)
+
+      # pack cache
+      cache <- keras::k_stack(list(k, v), axis = 2L)
     } else {
-      # create cache?
-      cache <- list(k = k, v = v)
+      # create cache? probably best not here
+      # should already be shape [batch, 2, max_seqlen, num_heads, head_size]
+      #max_context_size <- 2048L # don't put this here
+      #browser()
+      #cache <- keras::k_zeros(c(batch_size, 2, max_context_size, self$num_heads, self$head_size))
+      #print(cache)
+      #cache <- keras::k_stack(list(k, v), axis = 2L)
     }
 
     # reshape
@@ -179,7 +198,7 @@ layer_llama_multi_self_attention <- keras::new_layer_class(
 
     # calculate attention scores
     scores <- tf$matmul(q, k)/self$score_norm # {batch_size, num_heads, seqlen_q, seqlen_kv}
-    if (!is.null(attn_mask)) scores <- scores + attn_mask
+    scores <- scores + attn_mask
 
     # softmax should be fp32
     scores <- scores |>
@@ -240,7 +259,7 @@ layer_llama_transformer_block <- keras::new_layer_class(
   call = function(input, attn_rots, attn_mask, ...) {
     # trim mask
     c(batch_size, seqlen, n_features) %<-% tf$unstack(tf$shape(input))
-    attn_mask <- attn_mask[1,1,seqlen,seqlen, drop = FALSE]
+    attn_mask <- attn_mask[1,1,1:seqlen,1:seqlen, drop = FALSE] # does this work with cache?
 
     # self-attention + residual
     residual <- input
@@ -275,11 +294,19 @@ layer_llama_transformer_block <- keras::new_layer_class(
 #' Create LLaMA model
 #' @param params list of params
 #' @export
-llama_model <- function(params, max_context_size = 2048L) {
+llama_model <- function(params, max_context_size = 2048L, use_cache = FALSE) {
   # compute rotational embedding frequencies
   head_size <- params$dim %/% params$n_heads
   attn_rots <- rope_matrix(max_context_size, head_size)
+
+  # compute mask
   attn_mask <- llama_make_mask(max_context_size, dtype = tf$dtypes$float32)
+
+  # compute cache?
+  # should be shape [batch, 2, max_seqlen, num_heads, head_size]
+  #if (use_cache) {
+  #  attn_cache <- keras::k_zeros(c(2, max_context_size, params$n_heads, head_size))
+  #}
 
   inputs <- keras::layer_input(shape = keras::shape(NA), name = "input")
 
@@ -299,6 +326,7 @@ llama_model <- function(params, max_context_size = 2048L) {
       norm_eps = params$norm_eps,
       name = paste0("transformer_", i))
     c(transformer_blocks, cache) %<-% block(transformer_blocks, attn_rots = attn_rots, attn_mask = attn_mask)
+    #transformer_blocks <- block(transformer_blocks, attn_rots = attn_rots, attn_mask = attn_mask)
   }
 
   output <- transformer_blocks |>
@@ -397,7 +425,7 @@ llama_model2 <- keras::new_model_class(
       cache <- caches[[i]]
 
       # transformer block
-      c(x, cache) %<-% block(x, attn_rots = rots, attn_mask = mask, cache = cache, seqpos = position)
+      c(x, cache) %<-% block(x, attn_rots = rots, attn_mask = mask, cache = cache, cache_pos = position)
 
       # update cache
       # when cache is NULL this is removing an entry from caches.
@@ -422,7 +450,7 @@ llama_load_weights <- function(model, params, path = "~/data/llama-np/7B", from_
 
   # name map
   layermap <- readr::read_csv("inst/examples/llama-7b-layers.csv")
-  layermap <- setNames(layermap$llama_name, layermap$keras_name)
+  layermap <- stats::setNames(layermap$llama_name, layermap$keras_name)
   #layermap
 
   for (layer in model$layers) {

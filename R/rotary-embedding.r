@@ -30,8 +30,8 @@ rope_matrix <- function(seqlen, feature_dim, theta = 10000, dtype = keras::k_flo
 }
 
 rotate_every_two <- function(x) {
-  x1 <- x[all_dims(), `1::2`]
-  x2 <- x[all_dims(), `2::2`]
+  x1 <- x[tensorflow::all_dims(), `1::2`]
+  x2 <- x[tensorflow::all_dims(), `2::2`]
   y <- tf$stack(list(-x2, x1), axis = -1L)
   tf$reshape(y, tf$shape(x))
 }
