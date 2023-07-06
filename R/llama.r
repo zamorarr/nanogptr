@@ -145,6 +145,8 @@ layer_llama_multi_self_attention <- keras::new_layer_class(
   # cache = list of (k/v cached tensors)
   # cache_pos = current position in seqlen we are predicting (using cache)
   call = function(input, attn_rots, attn_mask, training = FALSE, cache = NULL, cache_pos = 0L) {
+    if (training && !is.null(cache)) stop("cannot use k/v cache while in training mode", call. = FALSE)
+
     # input = {batch_size, seqlen, n_features = head_size*num_heads}
     c(batch_size, seqlen_q, n_features) %<-% tf$unstack(tf$shape(input))
 
@@ -163,9 +165,6 @@ layer_llama_multi_self_attention <- keras::new_layer_class(
     # see: https://keras.io/api/keras_nlp/modeling_layers/cached_multi_head_attention/
     # https://github.com/keras-team/keras-nlp/blob/v0.5.1/keras_nlp/layers/cached_multi_head_attention.py#L23
     if (!is.null(cache)) {
-      # check we are not training
-      if (training) stop("cannot use k/v cache while in training mode", call. = FALSE)
-
       message("using kv cache!")
 
       # unpack cache
