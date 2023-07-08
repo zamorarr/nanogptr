@@ -179,6 +179,10 @@ layer_llama_multi_self_attention <- keras::new_layer_class(
       # pack cache
       cache <- keras::k_stack(list(k, v), axis = 2L)
     } else {
+      message("creating new cache")
+      # except want max_seqlen not seqlen
+      #cache <- keras::k_stack(list(k, v), axis = 2L)
+
       # create cache? probably best not here
       # should already be shape [batch, 2, max_seqlen, num_heads, head_size]
       #max_context_size <- 2048L # don't put this here
@@ -258,7 +262,7 @@ layer_llama_transformer_block <- keras::new_layer_class(
   call = function(input, attn_rots, attn_mask, ...) {
     # trim mask
     c(batch_size, seqlen, n_features) %<-% tf$unstack(tf$shape(input))
-    attn_mask <- attn_mask[1,1,1:seqlen,1:seqlen, drop = FALSE] # does this work with cache?
+    #attn_mask <- attn_mask[1,1,1:seqlen,1:seqlen, drop = FALSE] # does this work with cache?
 
     # self-attention + residual
     residual <- input
@@ -344,10 +348,10 @@ llama_model2 <- keras::new_model_class(
     head_size <-  params$dim %/% params$n_heads
 
     # pre-compute max-size rotation matrix
-    self$rots <- rope_matrix(max_seqlen, head_size)
+    self$attn_rots <- rope_matrix(max_seqlen, head_size)
 
     # pre-compute max-size mask
-    self$mask <- llama_make_mask(max_seqlen, keras::k_floatx())
+    self$attn_mask <- llama_make_mask(max_seqlen, keras::k_floatx())
 
     # embedding layers
     self$tok_embeddings <- keras::layer_embedding(
@@ -356,13 +360,13 @@ llama_model2 <- keras::new_model_class(
       name = "tok_embeddings")
 
     # transformer blocks
-    self$transformer_blocks <- lapply(seq(params$n_layers) - 1L, function(i) {
+    self$transformer_blocks <- lapply(seq(params$n_layers), function(i) {
       layer_llama_transformer_block(
         num_heads = params$n_heads,
         head_size = head_size,
         multiple_of = params$multiple_of,
         norm_eps = params$norm_eps,
-        name = paste0("transformer_", i))
+        name = paste0("transformer_", i - 1L))
     })
 
     # final layers
@@ -370,74 +374,44 @@ llama_model2 <- keras::new_model_class(
     self$lm_head <- layer_dense(units = params$vocab_size, use_bias = FALSE, name = "output")
   },
 
-  call = function(input) {
+  call = function(input, cache = NULL, cache_pos = 0L) {
     # get input shape
     c(batch_size, seqlen) %<-% tf$unstack(tf$shape(input))
 
     # seqlen-size mask and rotation matrix
-    mask <- self$mask[, , NA:seqlen, NA:seqlen]
-    rots <- lapply(self$rots, \(r) r[, NA:seqlen, ,])
+    mask <- self$attn_mask[, , 1:seqlen, 1:seqlen]
+    rots <- self$attn_rots[, , 1:seqlen, ,]
+
+    # initialize cache
+    n <- length(self$transformer_blocks)
+    if (is.null(cache)) {
+      cache <- vector("list", n)
+      names(cache) <- paste0("cache_", seq_len(n) - 1L)
+    }
+    stopifnot(length(cache) == n)
 
     # custom forward pass
     x <- input |> self$tok_embeddings()
-    for (block in self$transformer_blocks) {
-      c(x, cache) %<-% block(x, rots = rots, mask = mask)
+    for (i  in seq_along(self$transformer_blocks)) {
+      block <- self$transformer_blocks[[i]]
+      c(x, cache_i) %<-% block(x, attn_rots = rots, attn_mask = mask, cache = cache[[i]], cache_pos = cache_pos)
+      if (!is.null(cache_i)) cache[[i]] <- cache_i
     }
     output <- x |>
       self$norm() |> # rmsnorm
-      _[, -1L, ] |> # only select logit of last token
       self$lm_head() # dense projection
 
     # return output
-    output
+    c(list(output = output), cache)
   },
 
-  # position is zero-indexed?
-  call_with_cache = function(input, caches = NULL, position = 0L) {
-    # get input shape
-    c(batch_size, seqlen) %<-% tf$unstack(tf$shape(input))
-    stopifnot(is.null(caches) || seqlen == 1L)
-
-    # create default cache if none provided
-    if (is.null(caches)) caches <- vector("list", length(self$transformer_blocks))
-
-    # custom forward pass (using k/q cache)
-    x <- input |> self$tok_embeddings()
-
-    # trim rotation matrices? (no need, they are trimmed in rope())
-    # make mask
-    # if using caches, should only be running inference on one token
-    # at a time
-    stopifnot(length(caches) == length(self$transformer_blocks))
-    #stopifnot(names(caches[[1]]) == c("k", "v"))
-
-    # inference with one token
-    # no mask, smaller rotation matrix
-    mask <- NULL
-    #position <- keras::as_tensor(position, dtype = "int32")
-    rots <- lapply(self$rots, \(r) r[, position, , , drop = FALSE, style = "python"])
-
-    for (i in seq_along(self$transformer_blocks)) {
-      block <- self$transformer_blocks[[i]]
-
-      # get cache
-      cache <- caches[[i]]
-
-      # transformer block
-      c(x, cache) %<-% block(x, attn_rots = rots, attn_mask = mask, cache = cache, cache_pos = position)
-
-      # update cache
-      # when cache is NULL this is removing an entry from caches.
-      # FIX
-      caches[[i]] <- cache
+  get_config = function() {
+    config <- super$get_config()
+    params <- c("params")
+    for (p in params) {
+      config[[p]] <- self[[p]]
     }
-
-    output <- x |>
-      self$norm() |> # rmsnorm
-      self$lm_head() # dense projection
-
-    # return output and updated k/q cache
-    list(output = output, caches = caches)
+    config
   }
 )
 
