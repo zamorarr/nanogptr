@@ -25,8 +25,10 @@ test_that("rope_matrix produces correct shape", {
   rots <- rope_matrix(seqlen, feature_dim, theta = theta)
 
   # check shape
-  expect_equal(dim(rots$cos), c(1, seqlen, 1, feature_dim))
-  expect_equal(dim(rots$sin), c(1, seqlen, 1, feature_dim))
+  c(rots_cos, rots_sin) %<-% keras::k_unstack(rots, axis = 1L)
+  expect_equal(dim(rots), c(2, 1, seqlen, 1, feature_dim))
+  expect_equal(dim(rots_cos), c(1, seqlen, 1, feature_dim))
+  expect_equal(dim(rots_sin), c(1, seqlen, 1, feature_dim))
 })
 
 test_that("first token does not get rotated", {
@@ -36,10 +38,11 @@ test_that("first token does not get rotated", {
   feature_dim_half <- feature_dim %/% 2
 
   rots <- rope_matrix(seqlen, feature_dim, theta = theta)
+  c(rots_cos, rots_sin) %<-% keras::k_unstack(rots, axis = 1L)
 
   # check shape
-  expect_equal(as.vector(rots$cos[,1,,]), rep(1, feature_dim))
-  expect_equal(as.vector(rots$sin[,1,,]), rep(0, feature_dim))
+  expect_equal(as.vector(rots_cos[,1,,]), rep(1, feature_dim))
+  expect_equal(as.vector(rots_sin[,1,,]), rep(0, feature_dim))
 })
 
 test_that("rotate_every_two works", {
