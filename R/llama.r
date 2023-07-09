@@ -165,31 +165,22 @@ layer_llama_multi_self_attention <- keras::new_layer_class(
     # see: https://keras.io/api/keras_nlp/modeling_layers/cached_multi_head_attention/
     # https://github.com/keras-team/keras-nlp/blob/v0.5.1/keras_nlp/layers/cached_multi_head_attention.py#L23
     if (!is.null(cache)) {
-      message("using kv cache!")
-
       # unpack cache
       c(cache_k, cache_v) %<-% keras::k_unstack(cache, axis = 2L)
 
       # prepend caches to current k,v
       update_slice <- tf$compiler$tf2xla$python$xla$dynamic_update_slice
       cache_start <- c(0L, cache_pos, 0L, 0L)
-      k <- update_slice(cache_k, k, cache_start)
-      v <- update_slice(cache_v, v, cache_start)
+      cache_k <- update_slice(cache_k, k, cache_start)
+      cache_v <- update_slice(cache_v, v, cache_start)
+
+      # need to trim k/v back to seqlen. cache is max_seqlen
+      seqlen_kv <- seqlen_q + cache_pos
+      k <- cache_k[, 1:seqlen_kv, ,]
+      v <- cache_v[, 1:seqlen_kv, ,]
 
       # pack cache
-      cache <- keras::k_stack(list(k, v), axis = 2L)
-    } else {
-      message("creating new cache")
-      # except want max_seqlen not seqlen
-      #cache <- keras::k_stack(list(k, v), axis = 2L)
-
-      # create cache? probably best not here
-      # should already be shape [batch, 2, max_seqlen, num_heads, head_size]
-      #max_context_size <- 2048L # don't put this here
-      #browser()
-      #cache <- keras::k_zeros(c(batch_size, 2, max_context_size, self$num_heads, self$head_size))
-      #print(cache)
-      #cache <- keras::k_stack(list(k, v), axis = 2L)
+      cache <- keras::k_stack(list(cache_k, cache_v), axis = 2L)
     }
 
     # reshape
@@ -297,20 +288,15 @@ layer_llama_transformer_block <- keras::new_layer_class(
 #' Create LLaMA model
 #' @param params list of params
 #' @export
-llama_model <- function(params, max_context_size = 2048L, use_cache = FALSE) {
+llama_model <- function(params, max_seqlen = 2048L, use_cache = FALSE) {
   # compute rotational embedding frequencies
   head_size <- params$dim %/% params$n_heads
-  attn_rots <- rope_matrix(max_context_size, head_size)
+  attn_rots <- rope_matrix(max_seqlen, head_size)
 
   # compute mask
-  attn_mask <- llama_make_mask(max_context_size, dtype = tf$dtypes$float32)
+  attn_mask <- llama_make_mask(max_seqlen, dtype = tf$dtypes$float32)
 
-  # compute cache?
-  # should be shape [batch, 2, max_seqlen, num_heads, head_size]
-  #if (use_cache) {
-  #  attn_cache <- keras::k_zeros(c(2, max_context_size, params$n_heads, head_size))
-  #}
-
+  # layers
   inputs <- keras::layer_input(shape = keras::shape(NA), name = "input")
 
   token_embeddings <- inputs |>
@@ -329,7 +315,6 @@ llama_model <- function(params, max_context_size = 2048L, use_cache = FALSE) {
       norm_eps = params$norm_eps,
       name = paste0("transformer_", i))
     c(transformer_blocks, cache) %<-% block(transformer_blocks, attn_rots = attn_rots, attn_mask = attn_mask)
-    #transformer_blocks <- block(transformer_blocks, attn_rots = attn_rots, attn_mask = attn_mask)
   }
 
   output <- transformer_blocks |>
@@ -343,6 +328,7 @@ llama_model2 <- keras::new_model_class(
   "LlamaModel",
   initialize = function(params, ...) {
     super$initialize(...)
+    self$params <- params
 
     max_seqlen <- 2048L
     head_size <-  params$dim %/% params$n_heads
@@ -374,6 +360,14 @@ llama_model2 <- keras::new_model_class(
     self$lm_head <- layer_dense(units = params$vocab_size, use_bias = FALSE, name = "output")
   },
 
+  create_cache = function(batch_size, max_seqlen = 2048L) {
+    # should be shape [num_layers, batch, 2, max_seqlen, num_heads, head_size]
+    params <- self$params
+    head_size <-  params$dim %/% params$n_heads
+
+    keras::k_zeros(keras::shape(params$n_layers, batch_size, 2, max_seqlen, params$n_heads, head_size))
+  },
+
   call = function(input, cache = NULL, cache_pos = 0L) {
     # get input shape
     c(batch_size, seqlen) %<-% tf$unstack(tf$shape(input))
@@ -382,27 +376,80 @@ llama_model2 <- keras::new_model_class(
     mask <- self$attn_mask[, , 1:seqlen, 1:seqlen]
     rots <- self$attn_rots[, , 1:seqlen, ,]
 
-    # initialize cache
-    n <- length(self$transformer_blocks)
-    if (is.null(cache)) {
-      cache <- vector("list", n)
-      names(cache) <- paste0("cache_", seq_len(n) - 1L)
-    }
-    stopifnot(length(cache) == n)
-
     # custom forward pass
     x <- input |> self$tok_embeddings()
-    for (i  in seq_along(self$transformer_blocks)) {
-      block <- self$transformer_blocks[[i]]
-      c(x, cache_i) %<-% block(x, attn_rots = rots, attn_mask = mask, cache = cache[[i]], cache_pos = cache_pos)
-      if (!is.null(cache_i)) cache[[i]] <- cache_i
+
+    if (is.null(cache)) {
+      # do not use or save cache
+      for (i  in seq_along(self$transformer_blocks)) {
+        block <- self$transformer_blocks[[i]]
+        c(x, cache_i) %<-% block(x, attn_rots = rots, attn_mask = mask, cache = NULL, cache_pos = cache_pos)
+      }
+    } else {
+      # use and save cache
+      #browser()
+      cache <- keras::k_unstack(cache, axis = 1L)
+      for (i  in seq_along(self$transformer_blocks)) {
+        block <- self$transformer_blocks[[i]]
+        c(x, cache_i) %<-% block(x, attn_rots = rots, attn_mask = mask, cache = cache[[i]], cache_pos = cache_pos)
+        cache[[i]] <- cache_i
+      }
+      cache <- keras::k_stack(cache, axis = 1L)
     }
+
     output <- x |>
       self$norm() |> # rmsnorm
       self$lm_head() # dense projection
 
     # return output
-    c(list(output = output), cache)
+    list(output = output, cache = cache)
+  },
+
+  generate = function(input, max_new_tokens = 10L, block_size = 64L) {
+    # get input shape
+    c(batch_size, seqlen) %<-% keras::k_unstack(keras::k_shape(input))
+    seqlen <- as.integer(seqlen)
+
+    # create cache
+    max_seqlen <- min(seqlen + max_new_tokens, 2048L)
+    cache <- self$create_cache(batch_size, max_seqlen)
+
+    tfautograph::ag_while_opts(shape_invariants = list(
+      input = tf$TensorShape(list(batch_size, NULL))
+    ))
+
+    # loop over next tokens
+    cache_pos <- 0L
+    tfautograph::autograph({
+      for (i in keras::k_arange(max_new_tokens)) {
+        #browser()
+        # crop inputs to last max_seqlen tokens
+        start <- keras::k_maximum(seqlen - block_size, 1L)
+
+        if (i == 0L) {
+          input_cropped <- input[,1:seqlen]
+        } else {
+          input_cropped <- input[,seqlen,drop=FALSE]
+        }
+
+        # get the predictions
+        c(logits, cache) %<-% model(input_cropped, cache = cache, cache_pos = cache_pos) # {B, T, C}
+
+        # focus on last context token (bigram model)
+        logits <- logits[,-1L,]
+
+        # sample from distribution
+        idx_next <- tf$random$categorical(logits, 1L, dtype = tf$dtypes$int32) # {B, 1}
+
+        # append sampled index to running sequence
+        input <- keras::k_concatenate(list(input, idx_next), axis = 2) # {B, T+1}
+        cache_pos <- seqlen
+        seqlen <- seqlen + 1L
+      }
+    })
+
+    # return final
+    input
   },
 
   get_config = function() {
