@@ -405,53 +405,6 @@ llama_model2 <- keras::new_model_class(
     list(output = output, cache = cache)
   },
 
-  generate = function(input, max_new_tokens = 10L, block_size = 64L) {
-    # get input shape
-    c(batch_size, seqlen) %<-% keras::k_unstack(keras::k_shape(input))
-    seqlen <- as.integer(seqlen)
-
-    # create cache
-    max_seqlen <- min(seqlen + max_new_tokens, 2048L)
-    cache <- self$create_cache(batch_size, max_seqlen)
-
-    tfautograph::ag_while_opts(shape_invariants = list(
-      input = tf$TensorShape(list(batch_size, NULL))
-    ))
-
-    # loop over next tokens
-    cache_pos <- 0L
-    tfautograph::autograph({
-      for (i in keras::k_arange(max_new_tokens)) {
-        #browser()
-        # crop inputs to last max_seqlen tokens
-        start <- keras::k_maximum(seqlen - block_size, 1L)
-
-        if (i == 0L) {
-          input_cropped <- input[,1:seqlen]
-        } else {
-          input_cropped <- input[,seqlen,drop=FALSE]
-        }
-
-        # get the predictions
-        c(logits, cache) %<-% model(input_cropped, cache = cache, cache_pos = cache_pos) # {B, T, C}
-
-        # focus on last context token (bigram model)
-        logits <- logits[,-1L,]
-
-        # sample from distribution
-        idx_next <- tf$random$categorical(logits, 1L, dtype = tf$dtypes$int32) # {B, 1}
-
-        # append sampled index to running sequence
-        input <- keras::k_concatenate(list(input, idx_next), axis = 2) # {B, T+1}
-        cache_pos <- seqlen
-        seqlen <- seqlen + 1L
-      }
-    })
-
-    # return final
-    input
-  },
-
   get_config = function() {
     config <- super$get_config()
     params <- c("params")
@@ -461,6 +414,55 @@ llama_model2 <- keras::new_model_class(
     config
   }
 )
+
+llama_generate <- function(model, input, max_new_tokens = 10L, block_size = 64L) {
+  # get input shape
+  c(batch_size, seqlen) %<-% keras::k_unstack(keras::k_shape(input))
+  #seqlen <- as.integer(seqlen)
+
+  # create cache
+  max_seqlen <- min(seqlen + max_new_tokens, 2048L)
+  cache <- model$create_cache(batch_size, max_seqlen)
+
+  tfautograph::ag_while_opts(shape_invariants = list(
+    input = tf$TensorShape(list(batch_size, NULL))
+  ))
+
+  # loop over next tokens
+  cache_pos <- 0L
+  tfautograph::autograph({
+    for (i in keras::k_arange(max_new_tokens)) {
+      # crop inputs to last max_seqlen tokens
+      start <- keras::k_maximum(seqlen - block_size, 1L)
+
+      #browser()
+      if (i == 0L) {
+        input_cropped <- input[,NA:seqlen]
+      } else {
+        # this is still dropping the dim
+        input_cropped <- input[,seqlen-1L]
+        input_cropped <- keras::k_expand_dims(input_cropped)
+      }
+
+      # get the predictions
+      c(logits, cache) %<-% model(input_cropped, cache = cache, cache_pos = cache_pos) # {B, T, C}
+
+      # focus on last context token (bigram model)
+      logits <- logits[,-1L,]
+
+      # sample from distribution
+      idx_next <- tf$random$categorical(logits, 1L, dtype = tf$dtypes$int32) # {B, 1}
+
+      # append sampled index to running sequence
+      input <- keras::k_concatenate(list(input, idx_next), axis = 2) # {B, T+1}
+      cache_pos <- seqlen
+      seqlen <- seqlen + 1L
+    }
+  })
+
+  # return final
+  input
+}
 
 llama_load_weights <- function(model, params, path = "~/data/llama-np/7B", from_hf = FALSE) {
   np <- reticulate::import("numpy", convert = FALSE)
