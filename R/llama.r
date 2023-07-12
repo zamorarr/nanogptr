@@ -326,11 +326,10 @@ llama_model <- function(params, max_seqlen = 2048L, use_cache = FALSE) {
 
 llama_model2 <- keras::new_model_class(
   "LlamaModel",
-  initialize = function(params, ...) {
+  initialize = function(params, max_seqlen = 2048L, ...) {
     super$initialize(...)
     self$params <- params
 
-    max_seqlen <- 2048L
     head_size <-  params$dim %/% params$n_heads
 
     # pre-compute max-size rotation matrix
@@ -360,12 +359,18 @@ llama_model2 <- keras::new_model_class(
     self$lm_head <- layer_dense(units = params$vocab_size, use_bias = FALSE, name = "output")
   },
 
-  create_cache = function(batch_size, max_seqlen = 2048L) {
-    # should be shape [num_layers, batch, 2, max_seqlen, num_heads, head_size]
+  # the input here should already be padded to the max seqlen
+  create_cache = function(input) {
+    # input = {batch_size, max_seqlen}
     params <- self$params
     head_size <-  params$dim %/% params$n_heads
 
-    keras::k_zeros(keras::shape(params$n_layers, batch_size, 2, max_seqlen, params$n_heads, head_size))
+    # get input size
+    c(batch_size, max_seqlen) %<-% keras::k_unstack(keras::k_shape(input))
+
+    # cache = {num_layers, batch_size, 2, max_seqlen, num_heads, head_size}
+    cache_shape <- c(params$n_layers, batch_size, 2L, max_seqlen, params$n_heads, head_size)
+    tf$zeros(cache_shape, dtype = "float32")
   },
 
   call = function(input, cache = NULL, cache_pos = 0L) {
@@ -374,7 +379,17 @@ llama_model2 <- keras::new_model_class(
 
     # seqlen-size mask and rotation matrix
     mask <- self$attn_mask[, , 1:seqlen, 1:seqlen]
-    rots <- self$attn_rots[, , 1:seqlen, ,]
+
+    # what happens when seqlen ==1? rots should be [,,cache_pos,,]?
+    #zero <- tf$constant(0L)
+    tfautograph::autograph({
+      if (cache_pos > 0L) {
+        rots <- self$attn_rots[, , cache_pos - 1L, ,] # need to adjust rotation to current token position
+        rots <- rots[,,tf$newaxis,,]
+      } else {
+        rots <- self$attn_rots[, , 1:seqlen, ,]
+      }
+    })
 
     # custom forward pass
     x <- input |> self$tok_embeddings()
@@ -387,7 +402,6 @@ llama_model2 <- keras::new_model_class(
       }
     } else {
       # use and save cache
-      #browser()
       cache <- keras::k_unstack(cache, axis = 1L)
       for (i  in seq_along(self$transformer_blocks)) {
         block <- self$transformer_blocks[[i]]
@@ -417,51 +431,107 @@ llama_model2 <- keras::new_model_class(
 
 llama_generate <- function(model, input, max_new_tokens = 10L, block_size = 64L) {
   # get input shape
-  c(batch_size, seqlen) %<-% keras::k_unstack(keras::k_shape(input))
-  #seqlen <- as.integer(seqlen)
+  c(batch_size, input_seqlen) %<-% keras::k_unstack(keras::k_shape(input))
+
+  # calculate max seqlen
+  max_seqlen <- min(input_seqlen + max_new_tokens, block_size)
+  #max_seqlen <- input_seqlen + max_new_tokens
+
+  # XLA update tensor in place
+  update_slice <- tf$compiler$tf2xla$python$xla$dynamic_update_slice
+
+  # create output placeholder
+  output <- tf$zeros(c(batch_size, max_seqlen), dtype = input$dtype)
+  output <- update_slice(output, input, c(0L, 0L))
 
   # create cache
-  max_seqlen <- min(seqlen + max_new_tokens, 2048L)
-  cache <- model$create_cache(batch_size, max_seqlen)
+  cache <- model$create_cache(output)
 
-  tfautograph::ag_while_opts(shape_invariants = list(
-    input = tf$TensorShape(list(batch_size, NULL))
-  ))
+  # define sampler
+  #sampler <- function(x) tf$random$categorical(x, 1L, dtype = tf$dtypes$int32)
+  sampler <- function(x) tf$expand_dims(tf$argmax(x, axis = 1L, output_type = input$dtype), axis = 0L)
+  #sampler <- function(x) {
+  #  x |>
+  #    keras::k_argmax(axis = 2L) |>
+  #    keras::k_cast("int32") |>
+  #    keras::k_expand_dims(axis = 1L)
+  #}
+
+  # seed cache (forward pass)
+  c(logits, cache) %<-% model(input, cache = cache, cache_pos = 0L)
+  logits <- logits[,-1L,]
+  idx_next <- sampler(logits)
+  output <- update_slice(output, idx_next, c(0L, input_seqlen))
 
   # loop over next tokens
-  cache_pos <- 0L
+  #cache_pos <- 0L
+  cache_pos <- tf$constant(0L, dtype = "int32")
   tfautograph::autograph({
-    for (i in keras::k_arange(max_new_tokens)) {
-      # crop inputs to last max_seqlen tokens
-      start <- keras::k_maximum(seqlen - block_size, 1L)
-
-      #browser()
-      if (i == 0L) {
-        input_cropped <- input[,NA:seqlen]
-      } else {
-        # this is still dropping the dim
-        input_cropped <- input[,seqlen-1L]
-        input_cropped <- keras::k_expand_dims(input_cropped)
-      }
-
+    for (cache_pos in tf$range(input_seqlen + 1L, max_seqlen)) {
       # get the predictions
-      c(logits, cache) %<-% model(input_cropped, cache = cache, cache_pos = cache_pos) # {B, T, C}
+      c(logits, cache) %<-% model(idx_next, cache = cache, cache_pos = cache_pos) # {B, T, C}
 
-      # focus on last context token (bigram model)
+      # focus on last context token
       logits <- logits[,-1L,]
 
       # sample from distribution
-      idx_next <- tf$random$categorical(logits, 1L, dtype = tf$dtypes$int32) # {B, 1}
+      idx_next <- sampler(logits) # {B, 1}
 
       # append sampled index to running sequence
-      input <- keras::k_concatenate(list(input, idx_next), axis = 2) # {B, T+1}
-      cache_pos <- seqlen
-      seqlen <- seqlen + 1L
+      output <- update_slice(output, idx_next, c(0L, cache_pos)) # {B, T+1}
     }
   })
 
   # return final
-  input
+  output
+}
+
+llama_generate_naive <- function(model, input, max_new_tokens = 10L, block_size = 64L) {
+  # get input shape
+  c(batch_size, input_seqlen) %<-% keras::k_unstack(keras::k_shape(input))
+
+  # calculate max seqlen
+  max_seqlen <- min(input_seqlen + max_new_tokens, block_size)
+
+  # XLA update tensor in place
+  update_slice <- tf$compiler$tf2xla$python$xla$dynamic_update_slice
+
+  # create output placeholder
+  output <- tf$zeros(c(batch_size, max_seqlen), dtype = input$dtype)
+  output <- update_slice(output, input, c(0L, 0L))
+
+  # define sampler
+  #sampler <- function(x) tf$random$categorical(x, 1L, dtype = tf$dtypes$int32)
+  sampler <- function(x) {
+    x |>
+      keras::k_argmax(axis = 2L) |>
+      keras::k_cast("int32") |>
+      keras::k_expand_dims(axis = 1L)
+  }
+
+
+  # loop over next tokens
+  tfautograph::autograph({
+    for (i in tf$range(input_seqlen, max_seqlen)) {
+      # crop input
+      input_cropped <- output[,1:i]
+
+      # get the predictions
+      c(logits, cache) %<-% model(input_cropped) # {B, T, C}
+
+      # focus on last context token
+      logits <- logits[,-1L,]
+
+      # sample from distribution
+      idx_next <- sampler(logits) # {B, 1}
+
+      # append sampled index to running sequence
+      output <- update_slice(output, idx_next, c(0L, i)) # {B, T+1}
+    }
+  })
+
+  # return final
+  output
 }
 
 llama_load_weights <- function(model, params, path = "~/data/llama-np/7B", from_hf = FALSE) {
